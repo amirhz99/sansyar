@@ -353,13 +353,15 @@ class SansAgent:
                     if admin and reference:
                         p = service.player(reference)
                         effects['last_player_id'] = p['id']
-                        return service.debt(p['id'], level)
+                        return service.debt(p['id'], level) + service.shared_links(p['id'])
                     if admin and not reference:
                         return service.report()
                     linked = service.linked(user_id)
                     if not linked:
                         return 'حساب بله این کاربر هنوز به بازیکنی متصل نشده است. ابتدا باید نام کاملش را بگوید تا با ابزار identify ثبت شود.'
-                    return service.debt(linked['id'], level)
+                    # SPEC-049: the caller's own answer carries the partner block,
+                    # exactly like `/debt`, so the two paths cannot diverge.
+                    return service.debt(linked['id'], level) + service.shared_links(linked['id'])
                 if target == 'pending':
                     if not admin:
                         return 'فقط ادمین به لیست انتظار دسترسی دارد.'

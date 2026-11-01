@@ -55,6 +55,9 @@ ledger and the per-session history stay available with one extra word
   («شماره کارت هنوز ثبت نشده…»), never a fabricated number.
 - `DETAIL_WORDS` is the single catalogue of the detail words (`ریز`, `جزئیات`,
   `کامل`, `تاریخچه`, `full`, `details`) and is shared by the command and the tool.
+- The short answer ends with the linked-partners block (`Service.shared_links`) in
+  **both** the command and the model-tool path, exactly as the long report did, so
+  the two paths cannot diverge; the block is empty when the player has no link.
 - `query_database` keeps its previous behaviour for every target except `debt`.
 - The card is read from `settings['card']` only; the model never invents it.
 
@@ -67,6 +70,8 @@ ledger and the per-session history stay available with one extra word
 - [x] AC-003: `/debt` answers briefly, and `/debt ریز` answers with the ledger.
 - [x] AC-004: The model's `debt` tool is short by default and full with
   `detail='full'`.
+- [x] AC-005: The short answer carries the linked partners in both the command and
+  the model-tool path, and shows no block when there is no link.
 
 ## Test Mapping
 
@@ -75,6 +80,7 @@ ledger and the per-session history stay available with one extra word
 - AC-002 -> `tests/test_spec_049.py::ShortDebtTests::test_the_full_report_still_exists`
 - AC-003 -> `tests/test_spec_049.py::ShortDebtTests::test_the_command_is_short_and_its_detail_word_is_not`
 - AC-004 -> `tests/test_spec_049.py::ShortDebtTests::test_the_tool_is_short_until_the_model_asks_for_full`
+- AC-005 -> `tests/test_spec_049.py::ShortDebtTests::test_the_summary_carries_the_linked_partners`
 
 ## Safety Constraints
 

@@ -57,6 +57,27 @@ class ShortDebtTests(BaseCase):
         self.send('/debt ریز', user=10, chat=10)
         self.assertIn('گردش حساب', self.replies(10))
 
+    def test_the_summary_carries_the_linked_partners(self):
+        # A link between #1 and #2, then both paths must show the partner block.
+        with self.db.conn:
+            self.service.link_players(1, self.service.player('رضا محمدی')['id'], 1)
+            self.db.execute("INSERT INTO ledger(player_id,amount,note,source) VALUES (?,?,?,?)",
+                            (2, 150000, 'بدهی رضا', 'test:partner'))
+
+        short = self.service.debt(1, ResponseLevel.SUMMARY)
+        self.assertIn('حساب‌های پیوندی', short + self.service.shared_links(1))
+
+        self.send('/debt', user=10, chat=10)
+        command = self.replies(10)
+        self.assertIn('حساب‌های پیوندی', command)
+        self.assertIn('رضا محمدی', command)
+
+        tools = {tool.name: tool for tool in
+                 self.bot.agent._make_tools(10, 10, False, {'first_name': 'علی'}, {})}
+        answered = tools['query_database'].invoke({'target': 'debt'})
+        self.assertIn('حساب‌های پیوندی', answered)
+        self.assertIn('رضا محمدی', answered)
+
     def test_the_tool_is_short_until_the_model_asks_for_full(self):
         bot = self.bot
         tools = {tool.name: tool for tool in
