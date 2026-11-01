@@ -5,7 +5,7 @@ from datetime import date, datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
 from .content import CONTENT_PATH, DEFAULTS
-from .domain import DeclaredDirection
+from .domain import DeclaredDirection, ResponseLevel
 from .keyboards import contact_keyboard
 from . import jalali
 
@@ -331,6 +331,9 @@ def parse_session_datetime(value, now=None):
     _require_matching_weekday(target, date_text)
     return datetime.combine(target, time(hour, minute), tzinfo=TEHRAN).isoformat(timespec='minutes')
 
+
+# SPEC-049: words that ask for the long balance report instead of the short one.
+DETAIL_WORDS = frozenset({'ریز', 'جزئیات', 'کامل', 'تاریخچه', 'full', 'details'})
 
 ADMIN_ACTIONS = {'new_player', 'new_session', 'update_session', 'attendance',
                  'finalize', 'adjustment', 'settings', 'player_note', 'settle',
@@ -1056,18 +1059,38 @@ class Service:
         return self.db.one('SELECT COALESCE(SUM(amount),0) AS balance FROM ledger WHERE player_id=?',
                            (player_id,))['balance']
 
-    def debt(self, player_id):
+    def debt(self, player_id, level=ResponseLevel.DETAILS):
+        """Return the balance report for one player (SPEC-049).
+
+        ``SUMMARY`` is the default answer: the name, the balance, the card to pay
+        into, the payment note and anything still waiting for approval.  The
+        ledger walk and the per-session outstanding list stay in ``DETAILS``, so
+        a person who asks for the history still gets it — one request later.
+        """
         player = self.player(player_id)
         balance = self.balance(player_id)
         status = 'بدهی' if balance > 0 else 'بستانکاری' if balance < 0 else 'مانده'
-        lines = [player['name'], f'{status}: {abs(balance):,} تومان', '', 'گردش حساب (آخرین ۳۰ مورد؛ مثبت = بدهی):']
+        pending = self.db.one("SELECT COALESCE(SUM(amount),0) AS total FROM receipts WHERE player_id=? AND status='pending'",
+                              (player_id,))['total']
+        lines = [player['name'], f'{status}: {abs(balance):,} تومان']
+        if level != ResponseLevel.DETAILS:
+            if balance > 0:
+                # The person is about to pay, so the card belongs in this answer.
+                lines.append(f'کارت: {self.card()}')
+            if pending:
+                lines.append(f'رسیدهای منتظر تأیید: {pending:,} تومان (هنوز از بدهی کم نشده).')
+            if player['note']:
+                lines.append('توضیح: ' + player['note'])
+            if self.db.setting('payment_note'):
+                lines.append(self.db.setting('payment_note'))
+            return '\n'.join(lines)
+        lines.append('')
+        lines.append('گردش حساب (آخرین ۳۰ مورد؛ مثبت = بدهی):')
         entries = self.db.all('SELECT * FROM ledger WHERE player_id=? ORDER BY id DESC LIMIT 30', (player_id,))
         for row in reversed(entries):
             lines.append(f"{row['created_at'][:10]} | {row['amount']:+,} تومان | {row['note']}")
         if not entries:
             lines.append('تراکنشی ثبت نشده است.')
-        pending = self.db.one("SELECT COALESCE(SUM(amount),0) AS total FROM receipts WHERE player_id=? AND status='pending'",
-                              (player_id,))['total']
         if pending:
             lines.append(f'رسیدهای منتظر تأیید: {pending:,} تومان (هنوز از بدهی کم نشده).')
         # Allocate credits oldest first for an understandable outstanding-session report.

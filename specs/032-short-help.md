@@ -88,7 +88,8 @@ share-contact button.
   and not the player guide.
 - [x] AC-006: The balance is a separate one-line message delivered after the
   guide.
-- [x] AC-007: `/debt` still returns the full ledger.
+- [x] AC-007: `/debt` returns the balance report; the ledger walk is behind the
+  detail word (`/debt ریز`), see SPEC-049.
 - [x] AC-008: `GREETING_REPLY` and `WELCOME_COMPLETE` advertise no command.
 - [x] AC-009: A name without a number gets the reminder line and the
   share-contact keyboard. Superseded by SPEC-033: the card is now held back

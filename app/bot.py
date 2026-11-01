@@ -16,7 +16,7 @@ from .keyboards import CONTACT_BUTTON as _CONTACT_BUTTON
 from .keyboards import contact_keyboard as _contact_keyboard
 from .keyboards import hide_keyboard as _hide_keyboard
 from .presentation import SessionView
-from .service import (ADMIN_ACTIONS, Service, UserError, integer, normalize,
+from .service import (ADMIN_ACTIONS, DETAIL_WORDS, Service, UserError, integer, normalize,
                       normalize_phone, text)
 from . import review
 
@@ -1077,10 +1077,19 @@ class Bot:
                     if not self.db.setting('card'):
                         self.ask_admin('card', 'لطفاً شماره کارت و نام صاحب حساب را اعلام کنید؛ مثلاً «مسئول، شماره کارت ...».')
                 elif action == 'debt':
-                    p = self.service.player(args.get('player')) if admin and args.get('player') else self.service.linked(user_id)
+                    # SPEC-049: `/debt` answers briefly (balance + card + note); the
+                    # ledger walk is one more word away: `/debt ریز` or `detail=full`.
+                    ref = str(args.get('player') or '').strip()
+                    tokens = ref.split()
+                    detail = normalize(str(args.get('detail') or '')).strip() in DETAIL_WORDS
+                    if tokens and normalize(tokens[-1]) in DETAIL_WORDS:
+                        detail = True
+                        ref = ' '.join(tokens[:-1]).strip()
+                    p = self.service.player(ref) if admin and ref else self.service.linked(user_id)
                     if not p:
                         raise UserError('ابتدا با /identify نام کامل خود را معرفی کنید و منتظر تأیید اتصال حساب بمانید.')
-                    reply = self.service.debt(p['id'])
+                    reply = self.service.debt(
+                        p['id'], ResponseLevel.DETAILS if detail else ResponseLevel.SUMMARY)
                     # SPEC-025: a linked player sees his partners' balances and
                     # may propose to settle them; nothing moves without a click.
                     reply += self.service.shared_links(p['id'])

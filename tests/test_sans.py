@@ -635,10 +635,11 @@ class PermissionAndConversationTests(BaseCase):
         self.apply('adjustment', player=2, amount=999, note='بدهی خصوصی رضا')
         self.send('/debt رضا محمدی')
         self.assertNotIn('بدهی خصوصی رضا', self.replies(10))
-        self.send('/debt رضا محمدی', user=1, chat=-100)
+        # SPEC-049: the long view (with the ledger note) is behind the detail word.
+        self.send('/debt رضا محمدی ریز', user=1, chat=-100)
         self.assertIn('بدهی خصوصی رضا', self.replies(-100))
         before = self.replies(-100)
-        self.send('/debt رضا محمدی', user=55, chat=55)
+        self.send('/debt رضا محمدی ریز', user=55, chat=55)
         self.assertEqual(before, self.replies(-100))
 
 
@@ -992,11 +993,13 @@ class PermissionAndConversationTests(BaseCase):
 
     def test_ai_outage_does_not_break_commands(self):
         self.seed()
+        self.apply('adjustment', player=1, amount=350000, note='بدهی قبلی')
         self.ai.answer = APIError('unavailable')
         self.send('بدهی من چقدره؟')
         self.send('/debt')
         self.assertIn('سرویس هوش مصنوعی', self.replies(10))
-        self.assertIn('گردش حساب', self.replies(10))
+        # SPEC-049: the short balance is still answered without the model.
+        self.assertIn('بدهی: 350,000', self.replies(10))
 
     def test_batch_attendance_and_finalization_notifications(self):
         self.seed()
@@ -4858,9 +4861,17 @@ class ShortHelpTests(BaseCase):
         self.debt(1, 350000)
         self.send('/debt', user=10, chat=10)
 
+        # SPEC-049: the default answer is short, with the card to pay into.
         reply = self.replies(10)
-        self.assertIn('گردش حساب', reply)
-        self.assertIn('بدهی قبلی', reply)
+        self.assertIn('بدهی: 350,000', reply)
+        self.assertIn('کارت:', reply)
+        self.assertNotIn('گردش حساب', reply)
+
+        # ...and the ledger is one word away.
+        self.send('/debt ریز', user=10, chat=10)
+        full = self.replies(10)
+        self.assertIn('گردش حساب', full)
+        self.assertIn('بدهی قبلی', full)
 
     def test_welcome_and_greeting_advertise_no_command(self):
         self.seed()

@@ -15,8 +15,8 @@ from langgraph.prebuilt import tools_condition
 
 from . import jalali
 from .clients import APIError
-from .domain import DeclaredDirection
-from .service import (MAX_BATCH, TEHRAN, UserError, integer, normalize,
+from .domain import DeclaredDirection, ResponseLevel
+from .service import (DETAIL_WORDS, MAX_BATCH, TEHRAN, UserError, integer, normalize,
                       setting_value_is_explicit)
 
 LOG = logging.getLogger('sans.agent')
@@ -114,6 +114,7 @@ AGENT_SYSTEM_PROMPT = """تو «{bot_name}» هستی؛ دستیار هوشمن�
 
 ۲. مرز کارهای مستقیم و کارهای نیازمند تأیید ادمین:
    - کارهای خواندنی (`query_database`): همیشه آزاد. قبل از جواب دادن درباره بدهی، سانس یا حاضران، دیتابیس را چک کن.
+   - بدهی را **کوتاه و کلی** بگو: نام، مانده، و همان لحظه شمارهٔ کارت و متن پرداخت. ریز گردش حساب یا ماندهٔ هر سانس را فقط وقتی خودش خواست («ریز»، «تاریخچه»، «کدام سانس‌ها») با `query_database` و `detail='full'` بگیر؛ پیام را شلوغ نکن.
    - کارهای اجرایی روزمره (`manage_records`):
      * اگر کاربر «ادمین» است: ساخت و ویرایش بازیکنان، ساخت و ویرایش سانس‌ها (جدید یا قدیمی/ناقص)، و ثبت حضور و غیاب (تکی یا دسته‌جمعی برای چند نفر) را مستقیم و فوری با `manage_records` انجام بده و نتیجه را صمیمی گزارش کن.
      * تغییر تنظیمات (`card`، `payment_note`، `approval_required`) را با عملیات `update_settings` فقط به‌صورت پیشنهاد با دکمهٔ تأیید بساز؛ مقدار باید صریحاً در پیام همین نوبت کاربر نوشته شده باشد و هرگز از حافظه، پیام قبلی یا پاسخ‌هایی مثل «آره» برداشت نشود.
@@ -278,11 +279,14 @@ class SansAgent:
         db = bot.db
 
         @tool
-        def query_database(target: str, reference: str = '') -> str:
+        def query_database(target: str, reference: str = '', detail: str = '') -> str:
             """Read data from the database.
             target: 'overview', 'players', 'sessions', 'session_details', 'debt', 'pending',
                     'duplicate_players', 'identities', 'contacts'.
             reference: optional player name/ID or session title/ID.
+            detail: for target='debt' only; pass 'full' when the person asked for the
+                    ledger or the per-session history. The default is a short balance
+                    that already carries the card number and the payment note.
             """
             try:
                 if target == 'overview':
@@ -342,16 +346,20 @@ class SansAgent:
                     }
                     return json.dumps(info, ensure_ascii=False)
                 if target == 'debt':
+                    # SPEC-049: short by default; the ledger walk only on request.
+                    level = (ResponseLevel.DETAILS
+                             if normalize(str(detail or '')).strip() in DETAIL_WORDS
+                             else ResponseLevel.SUMMARY)
                     if admin and reference:
                         p = service.player(reference)
                         effects['last_player_id'] = p['id']
-                        return service.debt(p['id'])
+                        return service.debt(p['id'], level)
                     if admin and not reference:
                         return service.report()
                     linked = service.linked(user_id)
                     if not linked:
                         return 'حساب بله این کاربر هنوز به بازیکنی متصل نشده است. ابتدا باید نام کاملش را بگوید تا با ابزار identify ثبت شود.'
-                    return service.debt(linked['id'])
+                    return service.debt(linked['id'], level)
                 if target == 'pending':
                     if not admin:
                         return 'فقط ادمین به لیست انتظار دسترسی دارد.'
