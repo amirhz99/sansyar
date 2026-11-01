@@ -18,6 +18,7 @@ from .keyboards import hide_keyboard as _hide_keyboard
 from .presentation import SessionView
 from .service import (ADMIN_ACTIONS, Service, UserError, integer, normalize,
                       normalize_phone, text)
+from . import review
 
 # A greeting is answered by the model, but it is never allowed to trigger an
 # action.  This line is only the fail-closed fallback and the reply for a
@@ -25,6 +26,12 @@ from .service import (ADMIN_ACTIONS, Service, UserError, integer, normalize,
 GREETING_REPLY = 'سلام! در خدمتم؛ بفرمایید چه کاری برایتان انجام دهم؟'
 
 LOG = logging.getLogger('sans')
+
+# SPEC-048: a reply to the bot's own message that reads as a complaint is
+# recorded as feedback for the daily self-review.  Only the bot's own answers
+# are eligible, so an ordinary conversation can never be mistaken for a report.
+COMPLAINT_MARKERS = ('غلط', 'اشتباه', 'نادرست', 'درست نیست', 'درست نبود', 'جواب نداد')
+FEEDBACK_CONFIRMATION = 'ثبت شد ✅ این مورد در گزارش بعدی ربات می‌آید.'
 
 # SPEC-028: the acknowledgement message is a progress feed.  It is edited step by
 # step while a turn runs and is then left alone forever: the answer always goes
@@ -395,6 +402,52 @@ class Bot:
             return True
         action = command.get('action') if isinstance(command, dict) else None
         return action not in (None, 'identify')
+
+    @staticmethod
+    def complaint_note(body):
+        """Return the note when ``body`` reads as "this answer was wrong" (SPEC-048).
+
+        Only a short complaint counts: a long message that happens to contain
+        «غلط» is an ordinary request, and it must reach the model untouched.
+        """
+        text = (body or '').strip()
+        if not text:
+            return None
+        if text.split('@')[0] == '/wrong':
+            return text[len('/wrong'):].strip() or '❌'
+        plain = normalize(text).strip(' .!؟?:؛')
+        if plain in ('❌', '✖', '✗', 'x', '×', 'غلط'):
+            return text
+        if len(plain) <= 60 and any(marker in plain for marker in COMPLAINT_MARKERS):
+            return text
+        return None
+
+    def feedback(self, msg, body, chat_id, user_id, admin, sender_name):
+        """Record a complaint that replies to the bot's own answer (SPEC-048).
+
+        A reply carries the text of the message being answered, so the report
+        keeps the exact answer the person is complaining about without a new
+        table or a message-id mapping.  Returns the confirmation to send, or
+        ``None`` when the message is not feedback.
+        """
+        reply_to = msg.get('reply_to_message')
+        if not isinstance(reply_to, dict):
+            return None
+        origin = reply_to.get('from') if isinstance(reply_to.get('from'), dict) else {}
+        bot_id = int(self.db.setting('bot_id', '0') or 0)
+        if not origin.get('is_bot') or (bot_id and origin.get('id') != bot_id):
+            return None
+        note = self.complaint_note(body)
+        if note is None:
+            return None
+        self.db.log_agent_event(
+            chat_id, user_id, sender_name, 'FEEDBACK',
+            summary=note[:300],
+            details={'answer': (reply_to.get('text') or '')[:800],
+                     'answer_message_id': reply_to.get('message_id'),
+                     'admin': bool(admin)},
+        )
+        return FEEDBACK_CONFIRMATION
 
     def proactive_answer(self, msg, chat_id, user_id):
         """Return the outreach row when ``msg`` answers a proactive notice.
@@ -789,6 +842,14 @@ class Bot:
                         {'role': 'assistant', 'content': RELAY_CONFIRMATION}]
             self.db.save_conversation(chat_id, user_id, state, history)
             self.db.log_message(chat_id, 0, self.config.bot_name, RELAY_CONFIRMATION, 'assistant')
+            return
+        # SPEC-048: a complaint that replies to one of the bot's own answers is a
+        # report, not a request.  It is recorded and confirmed here, so it never
+        # costs a model call and can never be answered by the model.
+        complaint = self.feedback(msg, body, chat_id, user_id, admin, sender_name)
+        if complaint:
+            self.db.say(chat_id, complaint)
+            self.db.log_message(chat_id, 0, self.config.bot_name, complaint, 'assistant')
             return
         # In the admin group, don't interpret every ordinary conversation as a command.
         if not private and not self.addressed(msg, body):
@@ -2090,3 +2151,23 @@ class Bot:
             if count or identities:
                 self.db.say(self.config.admin_group, f'{count} رسید و {identities} درخواست هویت منتظر بررسی است. /report و /pending را ببینید.')
             self.db.set_setting('last_reminder', time.time())
+        # SPEC-048: the same daily tick writes the self-review report and sends
+        # its numeric digest, so no new timer or thread is needed.
+        self.send_self_review()
+
+    def send_self_review(self):
+        """Write the daily self-review report and send its digest (SPEC-048).
+
+        The report quotes user text, so it stays on the server under ``data/``
+        (git-ignored); the admin group receives counts only.  A reporting
+        failure must never break the reminder tick, so it never raises.
+        """
+        try:
+            path, digest, status = review.build(self.db.path, 1)
+        except Exception as exc:  # reporting is an aid, never a dependency
+            LOG.warning('Self-review report failed (%s)', type(exc).__name__)
+            return None
+        LOG.info('Self-review report written: %s (%s)', path, status)
+        with self.db.conn:
+            self.db.say(self.config.admin_group, digest)
+        return path

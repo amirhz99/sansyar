@@ -16,6 +16,7 @@ from .config import Config, ROOT, load_env
 from .db import Database
 from .service import UserError, integer, normalize, text
 from .turns import TurnBuffer
+from . import review
 # SPEC-022: the roster importer and the guest migration live in their own
 # module.  SPEC-039 retired the workbook half of it.
 from .backfill import (SESSION_HOUR, VENUE_COST, apply_sessions,
@@ -228,6 +229,13 @@ def run(db, config):
     LOG.info('Bot started; polling enabled')
     while True:
         try:
+            # SPEC-048: a heartbeat the doctor can read.  Once per 30 seconds is
+            # enough to tell "alive" from "alive but stuck", and the write cost is
+            # negligible.
+            stamp = time.time()
+            if stamp - float(db.setting('last_tick', '0') or 0) >= 30:
+                with db.conn:
+                    db.set_setting('last_tick', int(stamp))
             if time.time() - last_sweep >= SWEEP_INTERVAL:
                 last_sweep = time.time()
                 with db.conn:
@@ -302,6 +310,12 @@ def build_parser():
     commands.add_argument('--backup', type=Path, metavar='DESTINATION', help='Create consistent SQLite backup')
     commands.add_argument('--discover-ids', action='store_true', help='Show IDs from recent messages; only BALE_BOT_TOKEN needed')
     commands.add_argument('--logs', type=int, nargs='?', const=30, metavar='N', help='Show last N agent trace logs from database')
+    # SPEC-048: reporting only.  Both are read-only and can run while the bot
+    # works, because neither takes the installation lock.
+    commands.add_argument('--doctor', action='store_true',
+                          help='Print the self-health lines; exits 1 on a hard failure')
+    commands.add_argument('--review', type=int, nargs='?', const=7, metavar='DAYS',
+                          help='Write the findings report for the last DAYS days (default 7)')
     # SPEC-022 modifiers: they describe the roster, not the database.
     parser.add_argument('--dry-run', action='store_true',
                         help='SPEC-022: report what would change and roll it back')
@@ -358,6 +372,19 @@ def main():
             finally:
                 db.close()
             return
+        if args.doctor:
+            # SPEC-048: read-only, safe while the bot runs.
+            checks = review.health(path)
+            print(review.render_health(checks))
+            parser.exit(0 if review.summarise(checks) != 'FAIL' else 1)
+        if args.review is not None:
+            if not path.exists():
+                raise UserError('دیتابیس پیدا نشد؛ ابتدا `--init` را اجرا کنید.')
+            days = max(1, min(365, args.review))
+            report_path, digest, status = review.build(path, days)
+            print(digest)
+            print(f'\nگزارش کامل: {report_path}')
+            parser.exit(0 if status != 'FAIL' else 1)
         # Backups also acquire the installation lock: stop the bot first.
         with instance_lock(path):
             db = Database(path)
