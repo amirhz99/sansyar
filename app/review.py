@@ -29,6 +29,10 @@ TEHRAN = ZoneInfo('Asia/Tehran')
 
 # Failure lines that mean "the turn produced no real answer".
 FAILURE_MARKERS = ('سرویس هوش مصنوعی فعلاً', 'انجام شد.')
+# Fixed lines the bot may legitimately repeat for different inputs: counting
+# them as "the same answer again" would only add noise to the report.
+CANNED = ('این درخواست نامرتبط است', 'این دستور را نمی‌شناسم',
+          'سرویس هوش مصنوعی فعلاً')
 # A data question that reached the model without a single database read.
 DATA_WORDS = ('بدهی', 'بدهکار', 'بستانکار', 'مانده', 'حساب', 'قدر', 'چقدر',
               'سانس', 'حاضر', 'غیاب', 'رسید', 'کارت', 'گردش')
@@ -253,6 +257,9 @@ def _duplicates(turns):
     for turn in turns:
         text = (turn['answer'] or '').strip()
         previous = last.get(turn['chat_id'])
+        if text and any(marker in text for marker in CANNED):
+            last[turn['chat_id']] = turn          # a canned refusal is not a repeat
+            continue
         if (text and previous and (previous['answer'] or '').strip() == text
                 and previous['input'] != turn['input']):
             if clusters and clusters[-1]['last'] == previous['id']:

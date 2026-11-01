@@ -45,6 +45,15 @@ class ReviewDetectorTests(BaseCase):
         event(self.db, 'AGENT_REPLY', 'بدهی‌ات ۱۵۰٬۰۰۰ تومان است.')
         self.assertNotIn('duplicate_answer', self.findings())
 
+    def test_a_canned_refusal_is_not_a_repeated_answer(self):
+        # Two unrelated questions legitimately get the same fixed refusal.
+        for prompt in ('چه تمرینی خوبه؟', 'چه شیرینی بگیرم؟'):
+            event(self.db, 'INCOMING', prompt)
+            event(self.db, 'AGENT_REPLY',
+                  'این درخواست نامرتبط است؛ من فقط مسئول مدیریت سانس فوتبال هستم.',
+                  {'tool_calls': []})
+        self.assertNotIn('duplicate_answer', self.findings())
+
     def test_an_amount_outside_the_tool_result_is_reported(self):
         event(self.db, 'INCOMING', 'بدهی من چقدره')
         event(self.db, 'LLM_TOOL_CALL', 'query_database')
