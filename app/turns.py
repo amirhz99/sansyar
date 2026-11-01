@@ -88,6 +88,12 @@ class TurnBuffer:
         if ident is not None and ident in entry['ids']:
             # Keep the newest payload so the turn carries the freshest message
             # metadata, but do not add a fragment and do not extend the window.
+            # SPEC-046: Bale redelivers the same update as a fresh payload that
+            # does not carry the acknowledgement ``main.py`` attached to the
+            # buffered one, so it has to be carried over instead of dropped.
+            if update.get('_ack') is None and entry['update'].get('_ack') is not None:
+                update = dict(update)
+                update['_ack'] = entry['update']['_ack']
             entry['update'] = update
             return 'duplicate'
         entry['texts'].append(body)
@@ -146,6 +152,12 @@ class TurnBuffer:
         first = entry.get('first') or {}
         update = dict(entry['update'])
         texts = self._distinct(entry['texts'])
+        # SPEC-028/046: the progress acknowledgement is attached to the *first*
+        # fragment, but this merged turn is built from the *last* one.  Carry it
+        # over for a merged turn and for a single fragment alike: after a
+        # redelivery the newest payload no longer has it.
+        if update.get('_ack') is None and first.get('_ack') is not None:
+            update['_ack'] = first['_ack']
         if len(texts) > 1:
             # One turn, one reply: the model sees the whole thought in order.
             message = dict(update.get('message') or {})
@@ -153,9 +165,4 @@ class TurnBuffer:
             update['message'] = message
             update['_coalesced'] = [ident for ident in dict.fromkeys(entry['ids'])
                                     if isinstance(ident, int) and not isinstance(ident, bool)]
-            # SPEC-028: the progress acknowledgement is attached to the *first*
-            # fragment, but this merged turn is built from the *last* one.  Carry
-            # it over so a coalesced turn still has a progress message to edit.
-            if update.get('_ack') is None and first.get('_ack') is not None:
-                update['_ack'] = first['_ack']
         return update

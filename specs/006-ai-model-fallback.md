@@ -116,3 +116,10 @@ turn while it is unavailable. Operators can promote a healthy model by changing
 `test_fallback_reuses_the_same_provider_configuration`, which asserts that the
 fallback instances share `api_key`, `base_url`, `temperature`, `timeout`, and
 `max_retries` with the primary and that no table is created.
+
+2026-11-01: SPEC-044 made an empty answer count as a failed attempt, and
+SPEC-047 gave every failed attempt — raised or empty — one retry on the same
+model before the fallback chain moves on. A successful response is still never
+retried or duplicated, but the order in `test_langgraph_falls_back_to_secondary_model`
+is now `primary, primary, fallback, fallback`. `max_retries` is `0` so the
+provider client does not add its own attempts on top of that policy.

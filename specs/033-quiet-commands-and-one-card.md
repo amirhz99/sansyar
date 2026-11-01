@@ -46,8 +46,9 @@ known.
 
 - `acknowledgement_chat(update)` keeps returning the chat id for every turn that
   reaches the model, and for `/support`, which builds its own answer. It
-  returns `None` for a plain slash command, for `/start`, and for a bare
-  greeting.
+  returns `None` for a plain slash command and for `/start`. A bare greeting was
+  exempt here too, but SPEC-045 superseded that clause: a greeting reaches the
+  model and now announces the wait like any other turn.
 - A photo or document message keeps its notice: those always reach the model or
   the receipt flow, and the upload itself takes time.
 - `Bot.command()` stays the single source of truth for "is this a command". The
@@ -145,3 +146,7 @@ git diff --check
 - `/identify` sent inside a group is not recognised as an identity request; it
   is answered as an unknown command.  That is pre-existing, unrelated to this
   specification, and left untouched.
+- 2026-11-01: the greeting exemption is gone. A bare greeting reaches the model
+  and can take 7–13 seconds, so suppressing the notice made the bot look dead;
+  see SPEC-045. Everything else in this specification (quiet commands, one
+  identity card) still holds.

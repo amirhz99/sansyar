@@ -694,8 +694,10 @@ class AgentContractTests(unittest.TestCase):
                 },
             })
 
-        # The failed primary model is not retried within the same turn.
-        self.assertEqual(used, ['primary-model', 'fallback-model', 'fallback-model'])
+        # SPEC-006/047: the failed primary is retried once on itself before the
+        # fallback chain moves on, so it appears twice.
+        self.assertEqual(used, ['primary-model', 'primary-model',
+                                'fallback-model', 'fallback-model'])
         payloads = [json.loads(row['payload']) for row in self.db.all(
             "SELECT payload FROM outbox WHERE method='sendMessage' ORDER BY id")]
         self.assertIn('پاسخ از مدل جایگزین', payloads[-1]['text'])

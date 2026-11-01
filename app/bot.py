@@ -81,6 +81,20 @@ class TurnProgress:
         self.shown = None
         self.closed = False
         self.last_at = None
+        self.warned = False
+
+    def _warn_once(self, action, exc):
+        """Report the first failure of one feed at WARNING (SPEC-046).
+
+        These failures used to be swallowed at DEBUG, so a broken feed was
+        invisible in the journal: the user saw a frozen «در حال بررسی» line and
+        the log showed nothing at all.  One line per turn is enough.
+        """
+        if self.warned:
+            return
+        self.warned = True
+        LOG.warning('Progress %s failed for chat %s (%s); this turn keeps its answer',
+                    action, self.chat_id, exc)
 
     def step(self, text):
         """Show ``text`` on the progress message; return ``True`` if it was sent."""
@@ -98,9 +112,9 @@ class TurnProgress:
                                                  'text': text})
             return True
         except APIError as exc:
-            LOG.debug('Progress edit skipped for chat %s (%s)', self.chat_id, exc)
+            self._warn_once('edit', exc)
         except Exception as exc:  # a progress line must never break a turn.
-            LOG.debug('Progress edit failed for chat %s (%s)', self.chat_id, exc)
+            self._warn_once('edit', exc)
         return False
 
     def close(self):
@@ -115,15 +129,19 @@ class TurnProgress:
         self.closed = True
         if self.shown is None:
             return False
-        try:
-            self.client.call('deleteMessage', {'chat_id': self.chat_id,
-                                               'message_id': self.message_id})
-            return True
-        except APIError as exc:
-            # A message older than 48 hours cannot be deleted; that is fine.
-            LOG.debug('Progress removal skipped for chat %s (%s)', self.chat_id, exc)
-        except Exception as exc:  # a progress line must never break a turn.
-            LOG.debug('Progress removal failed for chat %s (%s)', self.chat_id, exc)
+        # SPEC-046: Bale answered HTTP 500 once for a removal that the next
+        # attempt accepted, so one immediate retry is worth it.  It stays
+        # bounded: no sleep, no loop, no exception.  A message older than 48
+        # hours cannot be deleted at all; that is fine too.
+        error = None
+        for _ in (1, 2):
+            try:
+                self.client.call('deleteMessage', {'chat_id': self.chat_id,
+                                                   'message_id': self.message_id})
+                return True
+            except Exception as exc:  # a progress line must never break a turn.
+                error = exc
+        self._warn_once('removal', error)
         return False
 
     def __call__(self, text):
@@ -340,11 +358,12 @@ class Bot:
         # "processing" notice would only add noise.
         if body.split('@')[0] == '/start':
             return None
-        # A bare greeting is answered with a single short message, so an extra
-        # "processing" notice would only add noise.
-        if (not msg.get('contact') and not msg.get('photo') and not msg.get('document')
-                and self.short_greeting(body, self.config.bot_name, self.db.setting('bot_username'))):
-            return None
+        # SPEC-045: a bare greeting is *not* exempt any more.  It is routed to the
+        # model like any other free message, so it waits for the same answer every
+        # other turn waits for.  It was silent here on the assumption that a
+        # greeting is answered with one short line; on the agent path the model
+        # composes it, and in production that took 7–13 seconds — a bot that looks
+        # dead.  `/start` and the deterministic commands above stay quiet.
         # SPEC-033: a slash command is answered deterministically, so there is no
         # wait to explain.  `command()` decides, so the command list stays in one
         # place.  Media messages are exempt: an upload is slow enough to justify

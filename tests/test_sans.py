@@ -871,9 +871,10 @@ class PermissionAndConversationTests(BaseCase):
         self.assertEqual(context['reply_to_message']['sender']['id'], 55)
 
     def test_acknowledgement_targets_only_messages_the_bot_will_process(self):
-        # A bare greeting is answered with one short message, so it gets no extra notice.
-        self.assertIsNone(self.bot.acknowledgement_chat({'update_id': 1, 'message': {
-            'chat': {'id': 10, 'type': 'private'}, 'from': {'id': 10}, 'text': 'سلام'}}))
+        # SPEC-045: a bare private greeting reaches the model, so it waits and
+        # gets the notice like every other model turn.
+        self.assertEqual(self.bot.acknowledgement_chat({'update_id': 1, 'message': {
+            'chat': {'id': 10, 'type': 'private'}, 'from': {'id': 10}, 'text': 'سلام'}}), 10)
         self.assertEqual(self.bot.acknowledgement_chat({'update_id': 8, 'message': {
             'chat': {'id': 10, 'type': 'private'}, 'from': {'id': 10}, 'text': 'بدهی من چقدره؟'}}), 10)
         self.assertEqual(self.bot.acknowledgement_chat({'update_id': 9, 'message': {
@@ -881,8 +882,10 @@ class PermissionAndConversationTests(BaseCase):
             'photo': [{'file_id': 'f1', 'file_unique_id': 'f1'}]}}), 10)
         self.assertIsNone(self.bot.acknowledgement_chat({'update_id': 2, 'message': {
             'chat': {'id': -100, 'type': 'group'}, 'from': {'id': 1}, 'text': 'سلام بچه‌ها'}}))
-        self.assertIsNone(self.bot.acknowledgement_chat({'update_id': 3, 'message': {
-            'chat': {'id': -100, 'type': 'group'}, 'from': {'id': 1}, 'text': 'مسئول سلام'}}))
+        # SPEC-045: an addressed greeting is a waiting turn like any other, so it
+        # keeps the notice; only the unaddressed one above stays silent.
+        self.assertEqual(self.bot.acknowledgement_chat({'update_id': 3, 'message': {
+            'chat': {'id': -100, 'type': 'group'}, 'from': {'id': 1}, 'text': 'مسئول سلام'}}), -100)
         self.assertEqual(self.bot.acknowledgement_chat({'update_id': 7, 'message': {
             'chat': {'id': -100, 'type': 'group'}, 'from': {'id': 99}, 'text': 'مسئول راهنما'}}), -100)
         with self.db.conn:

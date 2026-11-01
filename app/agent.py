@@ -14,6 +14,7 @@ from langgraph.graph import START, MessagesState, StateGraph
 from langgraph.prebuilt import tools_condition
 
 from . import jalali
+from .clients import APIError
 from .domain import DeclaredDirection
 from .service import (MAX_BATCH, TEHRAN, UserError, integer, normalize,
                       setting_value_is_explicit)
@@ -46,6 +47,58 @@ CONVERSATION_HISTORY = 20
 # SPEC-031: the prompt never invents a contact.  When no support handle is
 # configured, the rule points at the admins instead of showing a bare "@".
 SUPPORT_FALLBACK_TEXT = 'با ادمین‌های گروه مدیریتی در تماس باش'
+
+# SPEC-028: tools that only read may announce the read step; anything else may
+# change state, so it announces the write step.  SPEC-044 reuses the same
+# catalogue to decide whether a turn that produced no answer may tell the user
+# that nothing changed.
+READ_ONLY_TOOLS = frozenset({'query_database', 'list_sessions', 'get_session',
+                             'list_players', 'get_player', 'player_debt', 'report',
+                             'duplicates', 'pending_proposals', 'session_info'})
+
+
+def _answer_text(message) -> str:
+    """Return the readable text of one AI message, or ``''`` when it has none."""
+    content = getattr(message, 'content', '')
+    if isinstance(content, list):
+        content = '\n'.join(part.get('text', '') if isinstance(part, dict) else str(part)
+                            for part in content)
+    return str(content or '').strip()
+
+
+def _is_blank_answer(message) -> bool:
+    """Return whether a provider message carries neither text nor a tool call.
+
+    SPEC-044: some providers answer ``200 OK`` with an empty assistant message
+    when the upstream model produced nothing.  That is a failed attempt, not an
+    answer: an empty message must never become a reply, and it must never make
+    the caller reuse an older assistant message from the history.
+    """
+    if not isinstance(message, AIMessage):
+        return False
+    if _answer_text(message):
+        return False
+    return not (getattr(message, 'tool_calls', None) or [])
+
+
+def _finish_reason(message) -> str:
+    """Return the provider's ``finish_reason`` for a log line, when present."""
+    metadata = getattr(message, 'response_metadata', None) or {}
+    return str(metadata.get('finish_reason') or 'unknown')
+
+
+class EmptyAnswer(APIError):
+    """SPEC-044: the provider answered with neither text nor a tool call.
+
+    It is an ``APIError`` so that a turn which never gets an answer still ends
+    at the existing user-facing failure line instead of escaping the handler.
+    """
+
+
+# SPEC-044/047: how many times one model is asked for the same turn.  A blank
+# answer or a raised error is a failed attempt, never an answer: the same model
+# gets one more try before the SPEC-006 fallback chain moves on.
+MODEL_ATTEMPTS = 2
 
 
 AGENT_SYSTEM_PROMPT = """تو «{bot_name}» هستی؛ دستیار هوشمند، صمیمی، دقیق و همه‌فن‌حریفِ مدیریت سانس فوتبال در پیام‌رسان بله.
@@ -983,9 +1036,6 @@ class SansAgent:
         # SPEC-028: tools that only read may announce the read step; anything else
         # may change state, so it announces the write step.  The split is a fixed
         # catalogue keyed by a fixed set of names, so no tool name reaches a user.
-        read_only_tools = {'query_database', 'list_sessions', 'get_session',
-                           'list_players', 'get_player', 'player_debt', 'report',
-                           'duplicates', 'pending_proposals', 'session_info'}
         tool_steps_announced = set()
         tool_results = {'count': 0}
         turn_start = time.monotonic()
@@ -1010,7 +1060,10 @@ class SansAgent:
                 api_key=self.bot.config.ai_key,
                 base_url=self.bot.config.ai_url,
                 temperature=0.2,
-                max_retries=1,
+                # SPEC-047: the retry policy belongs to the loop below, so the
+                # provider client must not add its own attempts on top of it
+                # (a 35s timeout would otherwise be paid twice per try).
+                max_retries=0,
                 timeout=35,
             )
             models = list(dict.fromkeys(
@@ -1022,7 +1075,7 @@ class SansAgent:
                     api_key=self.bot.config.ai_key,
                     base_url=self.bot.config.ai_url,
                     temperature=0.2,
-                    max_retries=1,
+                    max_retries=0,
                     timeout=35,
                 ).bind_tools(tools))
 
@@ -1045,23 +1098,55 @@ class SansAgent:
             report(PROGRESS_ANSWERING if tool_results['count'] else PROGRESS_START)
             messages = [SystemMessage(content=sys_text)] + state['messages']
             # Start from the model that last answered; within one turn there are
-            # usually two model calls (tool round + final answer) and there is no
-            # reason to retry a model that already failed in this turn.
+            # usually two model calls (tool round + final answer).
             order = list(range(len(llms)))
             start = working['index']
             order = order[start:] + order[:start]
             response = None
             last_error = None
-            for position, index in enumerate(order):
+            attempts = {}
+            remaining = list(order)
+            while remaining:
+                index = remaining[0]
                 try:
-                    response = llms[index].invoke(messages)
+                    candidate = llms[index].invoke(messages)
+                    if _is_blank_answer(candidate):
+                        # SPEC-044: an empty message is a failed attempt, so it
+                        # joins the SPEC-006 chain instead of ending the turn
+                        # with a reply taken from the history.
+                        raise EmptyAnswer(
+                            f'empty answer from {models[index]} '
+                            f'(finish_reason={_finish_reason(candidate)})')
+                    response = candidate
                     working['index'] = index
                     break
                 except Exception as exc:
                     last_error = exc
-                    if position + 1 >= len(order):
+                    blank = isinstance(exc, EmptyAnswer)
+                    attempts[index] = attempts.get(index, 0) + 1
+                    # SPEC-044/047: every failed attempt is visible, whether the
+                    # provider answered with nothing or raised.
+                    self.bot.db.log_agent_event(
+                        chat_id,
+                        user_id,
+                        sender_name,
+                        'LLM_EMPTY' if blank else 'LLM_RETRY',
+                        summary=f'{models[index]}: {exc}',
+                        details={'model': models[index], 'attempt': attempts[index],
+                                 'error': f'{type(exc).__name__}: {exc}'[:300]},
+                    )
+                    if attempts[index] < MODEL_ATTEMPTS:
+                        # SPEC-047: one more try on the same model before giving
+                        # up on it.  A provider can drop one request and answer
+                        # the next one, and a second try costs nothing when the
+                        # model is healthy.
+                        LOG.warning('LLM model %s failed (%s); retrying the same model',
+                                    models[index], exc)
+                        continue
+                    remaining.pop(0)
+                    if not remaining:
                         break
-                    failed, nxt = models[index], models[order[position + 1]]
+                    failed, nxt = models[index], models[remaining[0]]
                     LOG.warning('LLM model %s failed (%s); trying fallback %s', failed, exc, nxt)
                     self.bot.db.log_agent_event(
                         chat_id,
@@ -1074,6 +1159,14 @@ class SansAgent:
                     )
             if response is None:
                 if last_error is not None:
+                    if any(call.get('name') not in READ_ONLY_TOOLS
+                           for call in effects['tool_calls']):
+                        # SPEC-044: a state-changing tool already ran, so the
+                        # turn cannot claim that nothing happened.  End it with
+                        # the tool's own result (preview or «انجام شد.»).
+                        LOG.warning('No model answer after a state change (%s); '
+                                    'ending the turn with the tool result', last_error)
+                        return {'messages': [AIMessage(content='')]}
                     raise last_error
                 raise RuntimeError('no AI model is configured')
             dt_ms = int((time.monotonic() - t0) * 1000)
@@ -1115,7 +1208,7 @@ class SansAgent:
                 # SPEC-028: announce what this tool is about to do.  Only the fixed
                 # catalogue text is sent, never the tool name or its arguments.
                 if tool_fn is not None:
-                    if t_name in read_only_tools:
+                    if t_name in READ_ONLY_TOOLS:
                         report(PROGRESS_READING)
                     else:
                         report(PROGRESS_WRITING)
@@ -1165,18 +1258,23 @@ class SansAgent:
 
         result = graph.invoke({'messages': lc_messages}, config={'recursion_limit': 12})
         final_messages = result.get('messages', [])
+        # SPEC-044: only the messages produced by *this* turn can become the
+        # answer.  The replayed history is input, so scanning it in reverse used
+        # to turn an empty model answer into the previous turn's reply.
+        generated = []
+        if len(final_messages) > len(lc_messages):
+            generated = final_messages[len(lc_messages):]
         reply = ''
-        for msg in reversed(final_messages):
-            if isinstance(msg, AIMessage) and msg.content:
-                if isinstance(msg.content, list):
-                    reply = '\n'.join(
-                        part.get('text', '') if isinstance(part, dict) else str(part)
-                        for part in msg.content
-                    ).strip()
-                else:
-                    reply = str(msg.content).strip()
-                if reply:
+        for msg in reversed(generated):
+            if isinstance(msg, AIMessage):
+                raw = _answer_text(msg)
+                if raw:
+                    reply = raw
                     break
+        if not reply and not effects['tool_calls'] and not effects.get('proposal_preview'):
+            # Nothing was said and nothing was done: fail closed instead of
+            # inventing a confirmation (SPEC-044).
+            raise APIError('the model returned no answer')
 
         reply = _unwrap_accidental_json(reply)
         reply = self._finalize_reply(reply, effects)
