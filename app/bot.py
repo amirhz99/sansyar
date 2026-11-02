@@ -518,7 +518,7 @@ class Bot:
                 return
             callback = update.get('callback_query')
             if callback:
-                self.callback(callback)
+                self.callback(callback, client=client)
             elif update.get('message'):
                 self.message(update['message'], acknowledgement, client=client)
             self.db.execute('INSERT INTO processed_updates(update_id) VALUES (?)', (uid,))
@@ -2106,24 +2106,91 @@ class Bot:
                     else 'تأیید نشد؛ مبلغ از بدهی کم نشد. برای توضیح یا اصلاح با ادمین تماس بگیرید.'))
         return f'رسید #{receipt_id} ' + ('تأیید شد ✅' if approve else 'رد شد.')
 
-    def callback(self, callback):
+    def callback(self, callback, client=None):
         chat_id = callback.get('message', {}).get('chat', {}).get('id')
         user_id = callback.get('from', {}).get('id')
         if not self.is_admin(chat_id, user_id):
             self.db.queue('answerCallbackQuery', {'callback_query_id': callback['id'], 'text': 'فقط ادمین مجاز در گروه مدیریتی.'})
             return
+        report = ''
         try:
             kind, ident = callback.get('data', '').split(':', 1)
             if kind in ('yes', 'no'):
                 result = self.confirm(ident, kind == 'yes', user_id)
+                # SPEC-050: read back what the approved proposal changed, so the
+                # confirmation carries the resulting state and not only "done".
+                if kind == 'yes':
+                    report = self.applied_report(ident)
             elif kind in ('pay', 'reject'):
                 result = self.review(integer(ident, 'شناسهٔ رسید', 1), kind == 'pay', user_id)
+                if kind == 'pay':
+                    report = self.receipt_report(ident)
             else:
                 raise UserError('دکمه معتبر نیست.')
         except (ValueError, sqlite3.IntegrityError) as exc:
             result = str(exc) if isinstance(exc, UserError) else 'درخواست معتبر نیست یا تکراری است.'
         self.db.queue('answerCallbackQuery', {'callback_query_id': callback['id'], 'text': result[:180]})
-        self.db.say(chat_id, result)
+        self.notify_applied(chat_id, result, report, client)
+
+    def applied_report(self, ident):
+        """Return the after-state report of an approved command proposal (SPEC-050)."""
+        row = self.db.one('SELECT kind, payload FROM pending WHERE id=?', (ident,))
+        if not row or row['kind'] != 'commands':
+            return ''
+        try:
+            payload = json.loads(row['payload'])
+        except ValueError:
+            return ''
+        if not isinstance(payload, list):
+            return ''
+        return self.service.applied_report(payload)
+
+    def receipt_report(self, ident):
+        """Return the after-state report of an approved receipt (SPEC-050)."""
+        row = self.db.one('SELECT player_id, amount FROM receipts WHERE id=?', (ident,))
+        if not row:
+            return ''
+        player = self.service.player(row['player_id'])
+        balance = self.service.balance(player['id'])
+        return ('📋 وضعیت بعد از تغییر:\n'
+                f"• رسید #{int(ident):,} برای {player['name']} تأیید شد"
+                f" ({row['amount']:,} تومان)\n"
+                f"• #{player['id']} {player['name']}: مانده {balance:,} تومان")
+
+    REPORTING_NOTICE = '⏳ در حال گزارش…'
+
+    def notify_applied(self, chat_id, result, report, client):
+        """Send the confirmation and extend it with the report (SPEC-050).
+
+        The admin sees one message that grows: the confirmation first, then a
+        «⏳ در حال گزارش…» line, then the final state read back from the
+        database.  The edit is a presentation aid: if the provider refuses any
+        call, the full text still reaches the admin through the outbox, so a
+        missing report can never cost the confirmation.
+        """
+        full = result if not report else f'{result}\n\n{report}'
+        if client is None or not report or len(full) > 3000:
+            self.db.say(chat_id, full)
+            return
+        try:
+            sent = client.call('sendMessage', {'chat_id': chat_id,
+                                               'text': f'{result}\n\n{self.REPORTING_NOTICE}'})
+        except APIError as exc:
+            LOG.debug('Confirmation send failed for chat %s (%s)', chat_id, exc)
+            self.db.say(chat_id, full)
+            return
+        message_id = sent.get('message_id') if isinstance(sent, dict) else None
+        if not isinstance(message_id, int) or isinstance(message_id, bool):
+            self.db.say(chat_id, full)
+            return
+        try:
+            client.call('editMessageText', {'chat_id': chat_id,
+                                            'message_id': message_id,
+                                            'text': full})
+        except APIError as exc:
+            # The confirmation is already on screen; add the report as a message.
+            LOG.warning('Applied report edit failed for chat %s (%s)', chat_id, exc)
+            self.db.say(chat_id, report)
 
     def ask_admin(self, key, question):
         now = time.time()

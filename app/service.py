@@ -1059,6 +1059,70 @@ class Service:
         return self.db.one('SELECT COALESCE(SUM(amount),0) AS balance FROM ledger WHERE player_id=?',
                            (player_id,))['balance']
 
+    def applied_report(self, commands):
+        """Return a verified after-the-fact report for approved commands (SPEC-050).
+
+        Every line is read back from the database after the change, so the admin
+        sees what actually happened — the balance, the session state, the stored
+        setting — not a restatement of what was requested.  A command whose
+        entity cannot be re-read simply contributes no line; the confirmation
+        itself is never affected.
+        """
+        selected = commands if isinstance(commands, list) else [commands]
+        lines = []
+        for command in selected:
+            if not isinstance(command, dict):
+                continue
+            for line in self._applied_lines(command):
+                if line not in lines:
+                    lines.append(line)
+        if not lines:
+            return ''
+        return '📋 وضعیت بعد از تغییر:\n' + '\n'.join(f'• {line}' for line in lines)
+
+    def _applied_lines(self, command):
+        """Return the report lines of one applied command (SPEC-050)."""
+        action = command.get('action')
+        args = command.get('args') if isinstance(command.get('args'), dict) else {}
+        out, refs = [], []
+        if args.get('player'):
+            refs.append(args['player'])
+        players = args.get('players')
+        if isinstance(players, str):
+            players = [item for item in players.split(',') if item.strip()]
+        if isinstance(players, (list, tuple)):
+            refs.extend(players)
+        if action == 'new_player' and args.get('name'):
+            refs.append(args['name'])
+        for ref in refs:
+            try:
+                player = self.player(ref)
+            except UserError:
+                continue
+            out.append(f"#{player['id']} {player['name']}: مانده {self.balance(player['id']):,} تومان")
+        if args.get('session') is not None or args.get('title'):
+            try:
+                session = self.session(args.get('session') or args.get('title'))
+            except UserError:
+                pass
+            else:
+                out.append(self._session_report_line(session))
+        if args.get('key'):
+            key = args['key']
+            label = SETTING_LABELS.get(key, key)
+            out.append(f"تنظیم «{label}»: {self.db.setting(key) or '—'}")
+        return out
+
+    def _session_report_line(self, session):
+        """Return one line describing a session's stored state (SPEC-050)."""
+        present = self.db.one('SELECT COUNT(*) n FROM attendance WHERE session_id=?',
+                              (session['id'],))['n']
+        charged = self.db.one('SELECT COALESCE(SUM(amount),0) t FROM ledger WHERE session_id=?',
+                              (session['id'],))['t']
+        state = 'برگزار نشد' if session['voided'] else 'نهایی' if session['finalized'] else 'باز'
+        return (f"سانس #{session['id']} «{session['title']}»: {state} | "
+                f"{present} حاضر | {charged:,} تومان در دفترکل")
+
     def debt(self, player_id, level=ResponseLevel.DETAILS):
         """Return the balance report for one player (SPEC-049).
 
