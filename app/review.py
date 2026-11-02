@@ -152,7 +152,7 @@ def _human_bytes(value):
         value /= 1024
 
 
-def health(db_path):
+def health(db_path, configured_group=None):
     """Return the health lines ``(name, status, detail)`` for one installation."""
     path = Path(db_path)
     checks = []
@@ -209,6 +209,20 @@ def health(db_path):
         add('LLM', 'WARN' if failed >= 5 else 'OK',
             f"24h: retry {counts.get('LLM_RETRY', 0)}, empty {counts.get('LLM_EMPTY', 0)}, "
             f"fallback {counts.get('LLM_FALLBACK', 0)} | p50 {p50 // 1000}s, p90 {p90 // 1000}s")
+        if configured_group:
+            # SPEC-051: a wrong ADMIN_GROUP_ID makes the bot silent in the group
+            # while everything else looks healthy.  Compare the configured id with
+            # the chats that actually reached the bot.
+            rows = conn.execute(
+                "SELECT DISTINCT chat_id FROM agent_logs WHERE event='INCOMING' "
+                "AND created_at >= datetime('now','-7 days')").fetchall()
+            seen = [int(row['chat_id']) for row in rows]
+            if int(configured_group) in seen:
+                add('GROUP', 'OK', f'configured group {configured_group} has traffic')
+            else:
+                add('GROUP', 'WARN',
+                    f'no message from configured group {configured_group} in 7d '
+                    f'(chats seen: {len(seen)})')
     finally:
         conn.close()
 

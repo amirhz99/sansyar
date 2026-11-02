@@ -291,6 +291,25 @@ class Bot:
         self.db.log_agent_event(chat_id, 0, '', 'REFUSED_CHAT',
                                 summary=f'{chat_id} {kind} {title}'.strip())
 
+    @staticmethod
+    def name_variants(value):
+        """Return the accepted spellings of a name (SPEC-051).
+
+        People type «مسئول», «مسیول» and «مسول» for the same word.  Normalising
+        only ZWNJ and digits leaves the hamza in place, so the bot ignored the
+        other two spellings while the room used them.  These variants are
+        derived from the configured name, so no name is hard-coded here.
+        """
+        base = normalize(value).strip()
+        if not base:
+            return ()
+        variants = {base,
+                    base.replace('ئ', 'ی').replace('ء', ''),
+                    base.replace('ئ', '').replace('ء', ''),
+                    base.replace('أ', 'ا').replace('إ', 'ا').replace('آ', 'ا'),
+                    base.replace('ي', 'ی').replace('ك', 'ک')}
+        return tuple(sorted(variant for variant in variants if variant))
+
     def addressed(self, msg, body):
         """Return whether a group message is directed at this bot.
 
@@ -301,9 +320,10 @@ class Bot:
         if body.startswith('/'):
             return True
         normalized_body = normalize(body)
-        bot_name = normalize(self.config.bot_name).strip()
+        names = list(self.name_variants(self.config.bot_name))
         bot_username = normalize(self.db.setting('bot_username')).lstrip('@').strip()
-        name_match = bool(bot_name and re.search(rf'(?<!\w){re.escape(bot_name)}(?!\w)', normalized_body))
+        name_match = any(re.search(rf'(?<!\w){re.escape(name)}(?!\w)', normalized_body)
+                         for name in names)
         username_match = bool(bot_username and re.search(rf'(?<!\w)@{re.escape(bot_username)}(?!\w)', normalized_body))
         if name_match or username_match:
             return True

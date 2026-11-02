@@ -374,7 +374,8 @@ def main():
             return
         if args.doctor:
             # SPEC-048: read-only, safe while the bot runs.
-            checks = review.health(path)
+            group = os.getenv('ADMIN_GROUP_ID', '').strip()
+            checks = review.health(path, int(group) if group.lstrip('-').isdigit() else None)
             print(review.render_health(checks))
             parser.exit(0 if review.summarise(checks) != 'FAIL' else 1)
         if args.review is not None:
