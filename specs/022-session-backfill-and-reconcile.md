@@ -1,0 +1,323 @@
+# SPEC-022: Real sessions instead of a snapshot, reconciled against the workbook
+
+Status: superseded
+Owner: agent
+Created: 2026-10-24
+
+> **Superseded by SPEC-039 (2026-10-29).** This specification shipped and closed
+> its migration on 2026-10-25. SPEC-039 then removed the workbook reader, the
+> payments importer (`--import-payments`), the reconcile gate (`--reconcile`)
+> and the override file (`--workbook-overrides`), because they served one
+> one-off import and could no longer pass against a ledger that had moved past
+> their cut-off. The roster importer (`--import-sessions`) and everything else
+> in this document remain in force; the criteria marked *retired* below no
+> longer have a test. The body is kept as the historical record of how the
+> 1405 balances were brought into the ledger.
+
+## Problem
+
+The football account for the period ending 16 Mordad 1405 lives in two places
+that disagree:
+
+- **The workbook** (`football-account.xlsx`) holds 51 rows and, per row, the
+  number of sessions attended, the number of sessions paid, the total debt, and
+  (sometimes) the Bale id. Every row satisfies
+  `debt = (attended − paid) × 150,000`: 149 attended slots, 31 paid slots,
+  17,700,000 T outstanding.
+- **The database** holds 3 sessions (8, 15 and 22 Khordad), 26 players, 51
+  attendance rows and 3,600,000 T of payments.
+
+The only importer that reads the workbook, `import_players`, writes one
+`opening:` ledger row per player and calls it a day. That has three defects:
+
+1. `_workbook_amount` ignores the «جلسات پرداخت شده» column, so a fully paid row
+   («ایلانلو», 1 attended and 1 paid) is recorded as 150,000 T of debt and the
+   imported total becomes 17,850,000 instead of 17,700,000.
+2. The header string and the note text («بدهی تا آخر شهریور») are hard-coded, so
+   the sheet's own period is not recorded.
+3. A snapshot cannot answer «which session is this debt for?», so `/debt` cannot
+   show the outstanding sessions and `/report` cannot show a per-session total.
+
+The three existing sessions are also incomplete: `session_at` is `NULL` for all
+of them, `venue_cost` is `NULL` for the first, and the first is titled
+«سانس ۹ خرداد» although 9 Khordad 1405 is a Saturday and every real session was
+a Friday at 16:30 in the Teymouri Tarasht hall.
+
+## Goal
+
+Ten real Friday sessions carry the whole period. Attendance, guest counts and
+payments are imported from the operator's roster, the workbook's debt column —
+with the operator's four approved corrections — is the acceptance gate, and after
+the last session every row of the sheet, plus the one approved addition,
+reconciles to it exactly — with no financial history deleted and every correction
+visible as its own ledger row.
+
+## Scope
+
+- `app/backfill.py`:
+  - `xlsx_rows`/`read_workbook`: read the sheet, derive
+    `debt = (attended − paid) × fee`, and reject a row whose non-empty debt cell
+    disagrees with that formula.
+  - `read_overrides`: merge the operator's approved corrections from a small CSV
+    (`name,attended,paid,debt`) **before** that validation, so a corrected row —
+    or a person the sheet does not list yet — is checked by the same formula
+    without editing the workbook itself.
+  - `read_plan`: read the attendance roster in a wide form (one row per person,
+    one column per date, cell = number of guests) or a long form
+    (`date,name,guests`).
+  - `planned_sessions`: resolve each date, require a Friday, and produce the
+    canonical title («سانس ۸ خرداد»), `when_text`, `session_at` and
+    `person_fee`/`venue_cost`.
+  - `resolve_players`: exact name, then `--alias ROSTER=STORED` (renames the
+    stored row and keeps its history), then `--allow-new NAME`, otherwise create.
+    A name that strongly resembles an existing player and is neither aliased nor
+    explicitly allowed blocks the import.
+  - `apply_sessions`: create or repair the sessions, then apply attendance as a
+    **delta** — insert the missing people, update the changed guest counts, and
+    record the difference in `ledger`; never delete a ledger row.
+  - `apply_payments`: bring each person's payments to
+    `paid_sessions × fee` with one adjustment row per person.
+  - `reconcile`: a read-only table of attended/paid/balance against the sheet.
+- `run.py --import-sessions CSV [--dry-run] [--alias A=B] [--allow-new NAME]`,
+  `--import-payments XLSX [--workbook-overrides CSV]`,
+  `--reconcile XLSX [--workbook-overrides CSV]`, and the shared
+  `--session-fee`/`--venue-cost`/`--hour` options. `--workbook-overrides` is a
+  modifier and not a command: `build_parser` keeps it outside the mutually
+  exclusive command group, so it can travel with the workbook it corrects, and
+  `check_modifiers` refuses it when no command can use it.
+- `_workbook_amount`/`_read_xlsx_players` in `app/main.py` delegate to
+  `app/backfill.py`, so the legacy snapshot path stops overstating a fully paid
+  row and records the sheet's own period in the note.
+- `examples/sessions-template.csv`: the fill-in roster (51 workbook names × 10
+  date columns), so the operator marks attendance instead of retyping names.
+- `data/workbook-overrides.csv`: the approved corrections in the operator's own
+  words, kept next to the roster so one file feeds both `--import-payments` and
+  `--reconcile`. The workbook file itself is never edited.
+
+## Non-goals
+
+- No schema change: `sessions`, `attendance` and `ledger` already express
+  everything this specification needs.
+- No change to the fee rule, the ledger semantics, or `Service.apply`; the
+  backfill writes the same `session:<id>:player:<pid>` charge a finalized
+  session writes.
+- No deletion of players, sessions, attendance or ledger rows. A correction is
+  always a new row with its own `source`.
+- No guessing of a person's identity. An unclear name stops the import.
+- The bot's chat behaviour, prompts, and response levels are untouched.
+
+## Contracts
+
+- **Roster input** (`--import-sessions`), wide form:
+
+  ```csv
+  نام,۸ خرداد,۱۵ خرداد,۲۲ خرداد
+  علی نمونه,0,1,
+  ```
+
+  An empty cell means absent, `0` means present without a guest, and `n` means
+  present with `n` guests. `x`, `✓`, `حاضر`, `بله` are accepted as `0`; `-` and
+  `غایب` as absent. Long form: `date,name,guests`.
+
+- **Session identity**: a planned date matches an existing session by its stored
+  date (`session_at`, else `when_text`, else `title`), and a stored date within
+  three days of the planned Friday is the same session with a wrong date — it is
+  repaired in place. Matching never creates a second row for one Friday.
+
+- **Charges**: `(1 + guests) × person_fee` per attendance row, posted as
+  `session:<id>:player:<pid>` when the pair has no ledger row yet, otherwise as
+  `session:<id>:player:<pid>:adjust` (with a numeric suffix if that key is
+  taken). `SUM(amount)` over the prefix always equals the current charge.
+
+- **Payments**: a person's paid total is every ledger row that is **not** a
+  session charge or an `opening:` snapshot (`source NOT LIKE 'session:%'` and
+  `NOT LIKE 'opening:%'`), so a snapshot debt is never read as a payment and a
+  correction stays stable. The target is `paid_sessions × fee`; the difference
+  to the current total is written as one `backfill:paid:<pid>` row (positive
+  when the database recorded too much payment). A name the roster did not create
+  is created from the sheet here.
+
+- **Attendance counts slots**: the workbook's «جلسات آمده» counts a player with
+  two guests as three attended sessions, so reconcile sums `1 + guests` over the
+  marked sessions.
+
+- **Reconcile gate**: `reconcile` returns `ok` only when every workbook row has
+  a player, attended/paid/balance equal the sheet, and no player outside the
+  sheet carries a non-zero balance. It never writes.
+
+- **Overrides**: `--workbook-overrides CSV` corrects the sheet **without**
+  editing it. The file has `name,attended,paid` and an optional `debt` in
+  thousands of تومان; `attended` and `paid` are required, and a stated `debt`
+  must equal `(attended − paid) × fee` or the import stops. A name the sheet
+  does not have is added — an approved late addition, not a silent widening of
+  the period — and a duplicate name in the file stops the import.
+
+- **Compatibility**: `Service.session_info()`, `/debt`, `/report`,
+  `import_players` with a CSV, and the `opening:` ledger key all keep working.
+  A session created by this importer is a normal finalized session.
+
+## Acceptance Criteria
+
+Retired criteria are kept for the record but no longer map to a test: SPEC-039
+removed the workbook reader, the payments importer and the reconcile gate, and
+the tests that covered them went with them. See `039-retire-workbook-import.md`.
+
+- [x] ~~AC-001~~ (retired, SPEC-039): The workbook reader derives `debt = (attended − paid) × fee` and refuses a row whose stated debt disagrees, naming the row.
+- [x] AC-002: The wide and the long roster forms produce the same sessions and the same attendance.
+- [x] AC-003: A roster date that is not a Friday is rejected before anything is written.
+- [x] AC-004: Each planned Friday becomes a session with the canonical title, `when_text`, a 16:30 Tehran `session_at`, `venue_cost` and `person_fee`.
+- [x] AC-005: An existing session stored one day off is repaired in place; no duplicate session is created and its charges keep their amount.
+- [x] AC-006: Attendance and charges that already exist are kept; only the missing people and the missing amount are added.
+- [x] AC-007: A changed guest count posts exactly one adjustment row for the difference.
+- [x] AC-008: A person dropped from the roster loses the attendance row and gets a reversal ledger row; no ledger row is deleted.
+- [x] AC-009: A roster name that strongly resembles an existing player, without an alias or `--allow-new`, aborts the import with nothing written.
+- [x] AC-010: An alias renames the stored short name, keeps its id and its ledger history, and is idempotent.
+- [x] ~~AC-011~~ (retired, SPEC-039): Payments are corrected to the workbook column, and running the import twice changes nothing the second time.
+- [x] ~~AC-012~~ (retired, SPEC-039): `reconcile` prints a per-person attended/paid/balance diff and writes nothing.
+- [x] ~~AC-013~~ (retired, SPEC-039): `reconcile` is `ok` and its totals equal the sheet when the ledger matches every row.
+- [x] AC-014: `--dry-run` reports the same plan and leaves the database unchanged.
+- [x] ~~AC-015~~ (retired, SPEC-039): The legacy snapshot importer no longer overstates a fully paid row and records the sheet's period.
+- [x] ~~AC-016~~ (retired, SPEC-039): An approved override file replaces the workbook row it names and may add a person the sheet does not list, under the same `debt = (attended − paid) × fee` rule.
+- [x] ~~AC-017~~ (retired, SPEC-039): An override whose stated debt disagrees with its own attended/paid slots stops the whole import instead of choosing one.
+- [x] ~~AC-018~~ (retired, SPEC-039): `--workbook-overrides` is accepted next to `--import-payments` and `--reconcile`, and is refused when no workbook command can use it.
+
+## Test Mapping
+
+- AC-002 -> `tests/test_backfill.py::PlanTests::test_wide_and_long_rosters_agree`
+- AC-003 -> `tests/test_backfill.py::PlanTests::test_a_non_friday_date_is_rejected`
+- AC-004 -> `tests/test_backfill.py::SessionImportTests::test_creates_the_ten_fridays_with_their_own_cost_and_fee`
+- AC-005 -> `tests/test_backfill.py::SessionImportTests::test_repairs_a_session_stored_one_day_off`
+- AC-006 -> `tests/test_backfill.py::SessionImportTests::test_existing_attendance_is_kept_and_only_the_gap_is_added`
+- AC-007 -> `tests/test_backfill.py::SessionImportTests::test_a_changed_guest_count_posts_one_adjustment`
+- AC-008 -> `tests/test_backfill.py::SessionImportTests::test_removing_a_player_records_a_reversal`
+- AC-009 -> `tests/test_backfill.py::NameTests::test_an_ambiguous_name_fails_closed`
+- AC-010 -> `tests/test_backfill.py::NameTests::test_an_alias_renames_the_stored_name_and_keeps_history`
+- AC-014 -> `tests/test_backfill.py::SessionImportTests::test_dry_run_leaves_the_database_unchanged`
+
+## Safety Constraints
+
+- The importer runs inside one SQLite transaction; any validation failure rolls
+  the whole import back, so a half-filled period is impossible.
+- Nothing is deleted: corrections are new ledger rows, and an attendance row is
+  only removed together with a reversal row that keeps the balance explainable.
+- A name is never guessed. Similarity is advisory and only blocks; it never
+  renames, merges or links on its own.
+- The workbook is the reference for money. If the sheet's own formula and its
+  debt column disagree, the import stops instead of choosing one.
+- `--reconcile` and `--dry-run` open no write path; the installation lock is
+  still taken so they cannot observe a half-written state.
+- Numbers stay out of the model context; this tool never calls the model.
+
+## Validation
+
+```bash
+python3 -m unittest discover -s tests -t . -v
+python3 -m compileall -q app tests
+git diff --check
+```
+
+## Notes
+
+- Decision: real sessions, not an `opening:` snapshot. The sheet's own formula
+  reproduces all 51 debts from attended and paid slots, and 19 of the 23 players
+  already in the database match their sheet value, so a snapshot would duplicate
+  what the ledger can derive.
+- Decision: the ten sessions are 8, 15, 22 and 29 Khordad, 5, 12, 19 and 26 Tir,
+  and 2 and 16 Mordad 1405 — ten consecutive Fridays except 9 Mordad, which was
+  cancelled. The operator confirmed every session was a Friday at 16:30.
+- Decision: the stored «۹ خرداد» session is repaired rather than replaced,
+  because 9 Khordad 1405 is a Saturday and the operator confirmed the Friday
+  list. Its 14 attendance rows and 2,400,000 T of charges stay untouched.
+- Limitation: the workbook has no per-session column, so the per-person
+  attended/paid totals are what the gate can prove. A roster that distributes
+  the same total over the wrong sessions still reconciles; the roster is the
+  operator's record and is imported as given.
+- Decision: the operator approved four corrections and one addition, and they
+  live in `data/workbook-overrides.csv` rather than in the workbook:
+  «حسن کریمی» 10/0, «حسین کریمی» 9/0 (the roster's «پسر سید»),
+  «بازیکن الف» 7/0, «بازیکن ب» 6/3, and «بازیکن ج» 7/2 — the person
+  the sheet never listed, whose existing three attendances and 300,000 T
+  settlement are now part of the period. The gate total therefore moves from
+  17,700,000 to 19,050,000 تومان; the four extra Fridays and his four extra
+  slots are exactly the 1,350,000 T difference.
+- Limitation: the operator's own per-person roster for the last seven Fridays
+  was not archived, so **which** person played **which** later Friday is a
+  reconstruction. What is exact: the first three Fridays (cell for cell from the
+  live database), every person's total (the workbook plus the corrections) and
+  the operator's per-session counts (15/22/13/18/12/15/14 names). The pairing
+  comes from a Gale–Ryser fill — the widest session first, the people who still
+  need the most Fridays first — so the money, the totals and the gate are
+  unaffected; only the per-session view of those seven Fridays is inferred.
+- Limitation: a player with activity that the sheet does not list is reported as
+  `extra` and keeps the gate red until the sheet is extended or the row is
+  settled by hand. The live database had one such player, «بازیکن ج», and the
+  approved override is what closes his line.
+
+## Validation Result
+
+- `python3 -m unittest discover -s tests -t . -v`: 308 tests, OK, no skips. The
+  26 `tests/test_backfill.py` tests cover the workbook reader, the override
+  file, the roster planner, the delta import, the payments, the gate and the
+  command line.
+- `python3 -m compileall -q app tests`: OK.
+- `git diff --check`: clean.
+- Roster evidence (offline): `data/sessions.csv` holds 52 names and 160 slots,
+  and `read_workbook(football-account.xlsx, data/workbook-overrides.csv)`
+  reports 52 rows, 160 attended, 33 paid and 19,050,000 T — zero mismatches per
+  name and no roster-only name. The first three Fridays are the live database's
+  own 14/18/19 rows; the seven later ones carry the operator's counts
+  15/22/13/18/12/15/14.
+- End-to-end rehearsal on a copy of the live database
+  (`cp data/sans.sqlite3 /tmp/verify-022.sqlite3`) with
+  `--alias "رضا محمدی=رسولی" --alias "مرتضی نوری=سبحانی"` and
+  `--allow-new "رفیق میزبان" --allow-new "امین"`: `--dry-run` wrote
+  nothing; the real run repaired sessions 1–3 in place («۹ خرداد» → «۸ خرداد»,
+  `session_at`/`venue_cost` filled, 14 ledger notes re-labelled with their
+  amounts unchanged), created the seven later Fridays, added 109 attendance
+  rows, corrected one guest count (a player's two guests, one −300,000 T
+  adjustment), removed **zero** rows, renamed #13 and #27 through the aliases
+  keeping their history, and created 26 players. `--import-payments` with
+  `--workbook-overrides` adjusted 8 lines and left 44 unchanged, and
+  `--reconcile football-account.xlsx --workbook-overrides
+  data/workbook-overrides.csv` is **green**: «جمع اکسل: 19,050,000 — جمع دفتر:
+  19,050,000», every per-person diff 0, all ten sessions covered, no `missing`
+  and no `extra`.
+- The legacy snapshot path still works on the real workbook: 51 rows,
+  `SUM(amount) = 17,700,000` (was 17,850,000), every note
+  «بدهی تا ۱۶ مرداد ۱۴۰۵», and the fully paid «ایلانلو» has no ledger row.
+- Live run on 2026-10-25 with the bot stopped and the backup
+  `data/backups/sans-backup-20261025-004933-pre022.sqlite3` in place:
+  `--import-sessions` reported «سانس جدید: 7؛ اصلاح‌شده: 3؛ حضور افزوده: 109؛
+  اصلاح حضور: 1؛ حذف حضور: 0؛ ردیف دفتر: 110», renamed #13 and #27 through the
+  aliases and created 26 players; `--import-payments` adjusted 8 lines and left
+  44 unchanged; `--reconcile` exited **0** with «جمع اکسل: 19,050,000 — جمع دفتر:
+  19,050,000» and a zero diff on all 52 rows. The live database now holds 52
+  players, 10 finalized sessions (every one `…T16:30+03:30` with
+  `venue_cost = 2,500,000`), 160 attendance rows and 185 ledger rows summing
+  19,050,000 T. Nothing was deleted: all 16 pre-existing `proposal:` rows and the
+  original 51 attendance rows are still there, and the bot was started again
+  afterwards.
+
+## Live run notes
+
+- `data/sessions.csv` holds the 52 names (51 sheet rows plus the approved
+  addition «بازیکن ج») and the ten Friday columns. It was rebuilt from the
+  evidence that survived: cells for 8, 15 and 22 Khordad come from the live
+  database, the seven later columns keep the operator's own per-session counts,
+  and every row total equals the corrected workbook.
+- Two names stay the operator's decision, not the tool's, and both are answered
+  with `--allow-new`: «رفیق میزبان» ≈ «علی میزبان» and «امین» ≈
+  «حسن کریمی». They are different people; «پویا» ≈ «پپویا» no longer
+  blocks because «پویا» is already stored.
+- «رسولی» and «سبحانی» in the live database are the sheet's «رضا محمدی» and
+  «مرتضی نوری»; they are renamed through `--alias "رضا محمدی=رسولی"`
+  and `--alias "مرتضی نوری=سبحانی"`, which keeps their ids and ledger
+  rows.
+- «بازیکن ج» has three attendances and one 300,000 T settlement in the live
+  database and no sheet row. The approved override gives him 7 attended and 2
+  paid, so his line closes instead of keeping the gate red.
+- A player's two guests in the first Friday are not in the sheet's count of
+  three attended and one paid, so the roster marks him once per session with no
+  guest: his charge falls by 300,000 T and the payment correction raises his
+  paid total's shortfall to the sheet's one slot. His balance is unchanged —
+  300,000 T before and after.
