@@ -23,7 +23,7 @@ class NameVariantTests(BaseCase):
             self.path, bot_name='مسئول')
         self.bot.config = self.config
         with self.db.conn:
-            self.db.set_setting('bot_username', 'sansrobot')
+            self.db.set_setting('bot_username', 'example_bot')
 
     def addressed(self, body):
         return self.bot.addressed({'chat': {'id': GROUP, 'type': 'group'}}, body)
@@ -40,7 +40,7 @@ class NameVariantTests(BaseCase):
 
     def test_a_command_and_the_username_still_work(self):
         self.assertTrue(self.addressed('/debt'))
-        self.assertTrue(self.addressed('@sansrobot بدهی من چقدره'))
+        self.assertTrue(self.addressed('@example_bot بدهی من چقدره'))
 
     def test_the_variants_come_from_the_configured_name(self):
         self.assertEqual(set(self.bot.name_variants('مسئول')),

@@ -1708,13 +1708,13 @@ class PlayerIdentityTests(BaseCase):
         self.assertFalse(self.db.all('SELECT * FROM pending'))
 
     def test_duplicates_report_and_players_hint(self):
-        self.apply('new_player', name='امین هاشمی')
-        self.apply('new_player', name='هاشمی')
+        self.apply('new_player', name='امین کریمی')
+        self.apply('new_player', name='کریمی')
         self.apply('new_session', title='سانس', when_text='فردا ساعت ۲۱')
-        self.apply('attendance', session=1, player=self.player_id('امین هاشمی'))
+        self.apply('attendance', session=1, player=self.player_id('امین کریمی'))
         self.send('/duplicates', user=1, chat=-100)
         report = self.replies(-100)
-        self.assertIn('هاشمی', report)
+        self.assertIn('کریمی', report)
         self.assertIn('/merge', report)
         self.assertIn('#', report)
 
@@ -1731,14 +1731,14 @@ class PlayerIdentityTests(BaseCase):
         self.assertEqual(created['name'], 'مهدی نمونه آزمایشی')
 
     def test_duplicate_pairs_keep_the_record_with_history(self):
-        self.apply('new_player', name='امین هاشمی')
-        self.apply('new_player', name='هاشمی')
+        self.apply('new_player', name='امین کریمی')
+        self.apply('new_player', name='کریمی')
         self.apply('new_session', title='سانس', when_text='فردا ساعت ۲۱')
-        self.apply('attendance', session=1, player=self.player_id('هاشمی'))
+        self.apply('attendance', session=1, player=self.player_id('کریمی'))
         pairs = self.service.duplicate_players()
         self.assertEqual(len(pairs), 1)
-        self.assertEqual(pairs[0]['keep']['name'], 'هاشمی')
-        self.assertEqual(pairs[0]['drop']['name'], 'امین هاشمی')
+        self.assertEqual(pairs[0]['keep']['name'], 'کریمی')
+        self.assertEqual(pairs[0]['drop']['name'], 'امین کریمی')
 
     def test_ensure_player_asks_before_creating_a_similar_name(self):
         self.apply('new_player', name='محمد احمدی')

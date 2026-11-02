@@ -21,7 +21,7 @@ Two data bugs make the gap worse:
   `contacts` and in the pending payload, but `Bot.confirm` only calls
   `service.bind()` and discards `payload['phone_number']`. Live proof:
   pending `9b7898198d6e47ac` (kind `identity`, approved) carries
-  `phone_number=+989366371562` for player #16, while `players.phone` is still
+  `phone_number=+989121234567` for player #16, while `players.phone` is still
   `''` and no `set_player_phone` audit row exists.
 - **The agent path drops the number too.** `bot.identify(name, user_id,
   chat_id, sender)` is called from `manage_records` without a phone, so a card
@@ -202,7 +202,7 @@ git diff --check
 - Limitation: the model-driven path depends on the model choosing to call
   `identify`; the `/identify` command remains the deterministic fallback.
 - Deployment: the live row for player #16 is corrected with
-  `Service.set_player_phone(16, '+989366371562', 'migration:spec-021')` after a
+  `Service.set_player_phone(16, '+989121234567', 'migration:spec-021')` after a
   database backup, because the approved card already carried the number.
 - Decision: the marker is per account, not per "unknown account", so existing
   players also see the welcome once on their next private message. For a linked
@@ -217,7 +217,7 @@ git diff --check
 - `python3 -m compileall -q app tests`: OK.
 - `git diff --check`: clean.
 - Live data: backup at `data/sans-backup-20261022-215515.sqlite3`; player #16
-  now has `+989366371562` and one `set_player_phone` audit row by
+  now has `+989121234567` and one `set_player_phone` audit row by
   `migration:spec-021`. The bot was stopped, patched, and restarted under
   `systemctl --user` (`active`, «Bot started; polling enabled»).
 - Behaviour smoke test on a temporary database: a first question gets the

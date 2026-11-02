@@ -871,8 +871,8 @@ class AgentContractTests(unittest.TestCase):
         config = Config('t', -100, frozenset({1}), 'https://example.invalid/v1', 'k', 'm',
                         Path(self.temp.name) / 'contracts.sqlite3')
         bot = Bot(self.db, config, SimpleNamespace(use_langgraph=True))
-        self.apply('new_player', name='امین هاشمی')
-        self.apply('new_player', name='هاشمی')
+        self.apply('new_player', name='امین کریمی')
+        self.apply('new_player', name='کریمی')
         self.apply('new_session', title='سانس', when_text='فردا ساعت ۲۱')
         self.apply('attendance', session=1, player=1)
 
@@ -886,7 +886,7 @@ class AgentContractTests(unittest.TestCase):
         self.assertIsNotNone(self.db.one('SELECT 1 FROM players WHERE id=2'))
 
         report = tools['query_database'].invoke({'target': 'duplicate_players'})
-        self.assertIn('هاشمی', report)
+        self.assertIn('کریمی', report)
         self.assertIn('/merge', report)
 
         # A non-admin sees no player directory analysis.

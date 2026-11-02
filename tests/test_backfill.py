@@ -361,9 +361,9 @@ class GuestMigrationTests(BackfillCase):
     def test_missing_host_is_created_in_guest_session(self):
         session = self.session('سانس مهمان', 'مهمان', players=[('مهمان', 0)])
         before = self.counts()
-        report = migrate_guests(self.db, [{'guest': 'مهمان', 'host': 'خلیل'}])
-        host = self.service.player('خلیل')
-        self.assertIn('خلیل', report['created_hosts'])
+        report = migrate_guests(self.db, [{'guest': 'مهمان', 'host': 'میزبان نمونه'}])
+        host = self.service.player('میزبان نمونه')
+        self.assertIn('میزبان نمونه', report['created_hosts'])
         row = self.db.one('SELECT * FROM attendance WHERE session_id=? AND player_id=?',
                           (session['id'], host['id']))
         # The host never played, so only the guest share is charged.
@@ -373,9 +373,9 @@ class GuestMigrationTests(BackfillCase):
 
     def test_two_guests_of_an_absent_host_share_one_guest_only_row(self):
         self.session('سانس مهمان‌ها', 'مهمان‌ها', players=[('مهمان یک', 0), ('مهمان دو', 0)])
-        report = migrate_guests(self.db, [{'guest': 'مهمان یک', 'host': 'خلیل'},
-                                          {'guest': 'مهمان دو', 'host': 'خلیل'}])
-        host = self.service.player('خلیل')
+        report = migrate_guests(self.db, [{'guest': 'مهمان یک', 'host': 'میزبان نمونه'},
+                                          {'guest': 'مهمان دو', 'host': 'میزبان نمونه'}])
+        host = self.service.player('میزبان نمونه')
         row = self.db.one('SELECT * FROM attendance WHERE player_id=?', (host['id'],))
         self.assertEqual((row['own'], row['guests']), (0, 2))
         self.assertEqual(self.service.balance(host['id']), 300000)

@@ -152,7 +152,7 @@ python3 run.py
 روی ماشین توسعه (بدون systemd و بدون root) همین مخزن کافی است:
 
 ```bash
-git clone https://github.com/amirhz99/sans.git
+git clone https://github.com/amirhz99/sansyar.git
 cd sans
 python3 -m venv .venv
 .venv/bin/pip install -r requirements.txt

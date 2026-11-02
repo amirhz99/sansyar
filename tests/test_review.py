@@ -150,7 +150,7 @@ class FeedbackTests(BaseCase):
 
     def test_a_long_message_is_not_feedback(self):
         self.seed()
-        self.reply('این را غلط نوشتی ولی مهم نیست، فقط بدهی موحد را دوباره چک کن و بگو چقدر است')
+        self.reply('این را غلط نوشتی ولی مهم نیست، فقط بدهی رضایی را دوباره چک کن و بگو چقدر است')
         self.assertFalse(self.feedback_rows())
         self.assertTrue(self.ai.calls)
 
