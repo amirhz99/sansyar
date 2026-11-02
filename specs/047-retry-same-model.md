@@ -94,8 +94,8 @@ git diff --check
 
 ## Notes
 
-Measured on 2026-11-01 against `api.inferhub.dev`: the primary model answered in
-9–13 s, `ali/deepseek-v4.1-flash` in ~8 s, `cb/glm-5.3-flash` in ~14 s. With
+Measured on 2026-11-01 against `api.example.com`: the primary model answered in
+9–13 s, `fallback-one` in ~8 s, `fallback-two` in ~14 s. With
 three models the worst case is six invocations; only a provider that hangs on
 every one of them can reach the timeout ceiling, and the operator chose
 "correct answer over fast failure" for that trade-off.

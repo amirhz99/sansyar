@@ -13,7 +13,7 @@ other free message, and on the LangGraph agent path the model composed the whole
 answer.
 
 The production trace of 2026-11-01 13:07–13:08 (`agent_logs` for chat
-`1590533468`) shows three greetings answered after **13.5s**, **7.0s**, and
+`123456789`) shows three greetings answered after **13.5s**, **7.0s**, and
 **13.1s**, each one calling `query_database`. Because the notice was suppressed,
 the user saw complete silence for that whole time and reported the bot as
 "stuck" again — the same symptom SPEC-044 had just fixed for answers.

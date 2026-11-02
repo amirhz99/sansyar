@@ -871,7 +871,7 @@ class AgentContractTests(unittest.TestCase):
         config = Config('t', -100, frozenset({1}), 'https://example.invalid/v1', 'k', 'm',
                         Path(self.temp.name) / 'contracts.sqlite3')
         bot = Bot(self.db, config, SimpleNamespace(use_langgraph=True))
-        self.apply('new_player', name='سید امین هاشمی')
+        self.apply('new_player', name='امین هاشمی')
         self.apply('new_player', name='هاشمی')
         self.apply('new_session', title='سانس', when_text='فردا ساعت ۲۱')
         self.apply('attendance', session=1, player=1)

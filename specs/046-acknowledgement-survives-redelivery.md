@@ -116,7 +116,7 @@ git diff --check
 
 ## Notes
 
-The live trace that exposed this is `agent_logs` for chat `1590533468` at
+The live trace that exposed this is `agent_logs` for chat `123456789` at
 15:32–15:33 on 2026-11-01: two answered turns, no `WARNING` in the journal, and
 no progress edit at all, while the same flow called directly against
 `tapi.bale.ai` (send → edit → edit → edit → delete) succeeded.

@@ -112,7 +112,7 @@ visible as its own ledger row.
 
   ```csv
   نام,۸ خرداد,۱۵ خرداد,۲۲ خرداد
-  مهیار نمونه,0,1,
+  علی نمونه,0,1,
   ```
 
   An empty cell means absent, `0` means present without a guest, and `n` means
@@ -235,7 +235,7 @@ git diff --check
 - Decision: the operator approved four corrections and one addition, and they
   live in `data/workbook-overrides.csv` rather than in the workbook:
   «حسن کریمی» 10/0, «حسین کریمی» 9/0 (the roster's «پسر سید»),
-  «علیرضا نژاد مقدم» 7/0, «مهدی روستایی» 6/3, and «علی صدری» 7/2 — the person
+  «بازیکن الف» 7/0, «بازیکن ب» 6/3, and «بازیکن ج» 7/2 — the person
   the sheet never listed, whose existing three attendances and 300,000 T
   settlement are now part of the period. The gate total therefore moves from
   17,700,000 to 19,050,000 تومان; the four extra Fridays and his four extra
@@ -250,7 +250,7 @@ git diff --check
   unaffected; only the per-session view of those seven Fridays is inferred.
 - Limitation: a player with activity that the sheet does not list is reported as
   `extra` and keeps the gate red until the sheet is extended or the row is
-  settled by hand. The live database had one such player, «علی صدری», and the
+  settled by hand. The live database had one such player, «بازیکن ج», and the
   approved override is what closes his line.
 
 ## Validation Result
@@ -270,7 +270,7 @@ git diff --check
 - End-to-end rehearsal on a copy of the live database
   (`cp data/sans.sqlite3 /tmp/verify-022.sqlite3`) with
   `--alias "رضا محمدی=رسولی" --alias "مرتضی نوری=سبحانی"` and
-  `--allow-new "رفیق علی بختیاری" --allow-new "امین"`: `--dry-run` wrote
+  `--allow-new "رفیق میزبان" --allow-new "امین"`: `--dry-run` wrote
   nothing; the real run repaired sessions 1–3 in place («۹ خرداد» → «۸ خرداد»,
   `session_at`/`venue_cost` filled, 14 ledger notes re-labelled with their
   amounts unchanged), created the seven later Fridays, added 109 attendance
@@ -301,19 +301,19 @@ git diff --check
 ## Live run notes
 
 - `data/sessions.csv` holds the 52 names (51 sheet rows plus the approved
-  addition «علی صدری») and the ten Friday columns. It was rebuilt from the
+  addition «بازیکن ج») and the ten Friday columns. It was rebuilt from the
   evidence that survived: cells for 8, 15 and 22 Khordad come from the live
   database, the seven later columns keep the operator's own per-session counts,
   and every row total equals the corrected workbook.
 - Two names stay the operator's decision, not the tool's, and both are answered
-  with `--allow-new`: «رفیق علی بختیاری» ≈ «علی بختیاری» and «امین» ≈
+  with `--allow-new`: «رفیق میزبان» ≈ «علی میزبان» and «امین» ≈
   «حسن کریمی». They are different people; «پویا» ≈ «پپویا» no longer
   blocks because «پویا» is already stored.
 - «رسولی» and «سبحانی» in the live database are the sheet's «رضا محمدی» and
   «مرتضی نوری»; they are renamed through `--alias "رضا محمدی=رسولی"`
   and `--alias "مرتضی نوری=سبحانی"`, which keeps their ids and ledger
   rows.
-- «علی صدری» has three attendances and one 300,000 T settlement in the live
+- «بازیکن ج» has three attendances and one 300,000 T settlement in the live
   database and no sheet row. The approved override gives him 7 attended and 2
   paid, so his line closes instead of keeping the gate red.
 - A player's two guests in the first Friday are not in the sheet's count of

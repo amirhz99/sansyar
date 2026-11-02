@@ -120,8 +120,8 @@ git diff --check
 
 ## Notes
 
-The production trace is `/root/sans/data/logs/agent.log` and
-`conversations.history` for chat `1590533468`: five turns whose
+The production trace is `/opt/sans/data/logs/agent.log` and
+`conversations.history` for chat `123456789`: five turns whose
 `[AGENT_REPLY]` text equals the reply of the turn before, while `tools=0` and
 the provider answered `200 OK`. Replaying the same history against the live
 provider now answers correctly, so the empty message was a provider-side hiccup
@@ -136,9 +136,9 @@ fails; the operator sees it in the `LLM_FALLBACK` events and can change
 `AI_MODEL` in `.env` and restart `sans-bot.service`.
 
 The code never edits configuration. Separately from this patch, the deployment's
-own `.env` was corrected: the old value `AI_FALLBACK_MODEL=gemini-3.8-flash` is
+own `.env` was corrected: the old value `AI_FALLBACK_MODEL=fallback-model` is
 not served by the configured endpoint (HTTP 429 after 39s), while
-`ali/deepseek-v4.1-flash` and `cb/glm-5.3-flash` answer in 7–9s and support tool
+`fallback-one` and `fallback-two` answer in 7–9s and support tool
 calls, so the live fallback list is now
-`ali/deepseek-v4.1-flash,cb/glm-5.3-flash`.
+`fallback-one,fallback-two`.
   line, not an old answer.

@@ -74,8 +74,8 @@ class ReviewDetectorTests(BaseCase):
 
     def test_a_user_id_is_never_read_as_an_amount(self):
         event(self.db, 'INCOMING', 'شناسه من چیه؟')
-        event(self.db, 'TOOL_RESULT', 'شناسه: 1590533468', {'result': 'شناسه: 1590533468'})
-        event(self.db, 'AGENT_REPLY', 'شناسهٔ شما 1590533468 است.', {'tool_calls': [1]})
+        event(self.db, 'TOOL_RESULT', 'شناسه: 123456789', {'result': 'شناسه: 123456789'})
+        event(self.db, 'AGENT_REPLY', 'شناسهٔ شما 123456789 است.', {'tool_calls': [1]})
         self.assertNotIn('unverified_number', self.findings())
 
     def test_a_data_question_without_a_read_is_reported(self):

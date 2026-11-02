@@ -9,7 +9,7 @@ import unittest
 from app.domain import ResponseLevel
 from tests.test_sans import BaseCase
 
-CARD = '5041721076234674 (بانک رسالت)'
+CARD = '0000-0000-0000-0000 (بانک نمونه)'
 
 
 class ShortDebtTests(BaseCase):

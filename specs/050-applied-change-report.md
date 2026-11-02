@@ -121,7 +121,7 @@ edited into:
 ثبت شد ✅
 
 📋 وضعیت بعد از تغییر:
-• #16 امیرحسین زارعی: مانده 2,550,000 تومان
+• #16 علی رضایی: مانده 2,550,000 تومان
 ```
 
 Known limit: the two calls happen inside the same transaction that applied the

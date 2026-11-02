@@ -1131,7 +1131,7 @@ class AdminBindingTests(BaseCase):
 
 class OperationalTests(BaseCase):
     def test_config_group_members_does_not_require_allowlist(self):
-        env = {'BALE_BOT_TOKEN': 'test', 'ADMIN_GROUP_ID': '5312848841',
+        env = {'BALE_BOT_TOKEN': 'test', 'ADMIN_GROUP_ID': '-1001234567890',
                'ADMIN_ACCESS': 'group_members', 'AI_BASE_URL': 'https://example.com/v1',
                'AI_API_KEY': 'test', 'AI_MODEL': 'test'}
         with patch.dict(os.environ, env, clear=True), patch('app.config.load_env'):
@@ -1190,7 +1190,7 @@ class OperationalTests(BaseCase):
         """
         source = Path(self.temp.name) / 'account.xlsx'
         write_xlsx(source, (('نام', 'جلسات آمده', 'جلسات پرداخت شده', 'مجموع  بدهکاری'),
-                            ('مهیار', 10, 2, 1200)))
+                            ('علی', 10, 2, 1200)))
         self.seed()
         before = (self.db.one('SELECT COUNT(*) n FROM players')['n'],
                   self.db.one('SELECT COUNT(*) n FROM ledger')['n'])
@@ -1708,10 +1708,10 @@ class PlayerIdentityTests(BaseCase):
         self.assertFalse(self.db.all('SELECT * FROM pending'))
 
     def test_duplicates_report_and_players_hint(self):
-        self.apply('new_player', name='سید امین هاشمی')
+        self.apply('new_player', name='امین هاشمی')
         self.apply('new_player', name='هاشمی')
         self.apply('new_session', title='سانس', when_text='فردا ساعت ۲۱')
-        self.apply('attendance', session=1, player=self.player_id('سید امین هاشمی'))
+        self.apply('attendance', session=1, player=self.player_id('امین هاشمی'))
         self.send('/duplicates', user=1, chat=-100)
         report = self.replies(-100)
         self.assertIn('هاشمی', report)
@@ -1722,8 +1722,8 @@ class PlayerIdentityTests(BaseCase):
         self.assertIn('/duplicates', self.replies(-100))
 
     def test_same_family_name_is_not_a_duplicate(self):
-        self.apply('new_player', name='مهیار نمونه آزمایشی')
-        self.apply('new_player', name='مهراد نمونه آزمایشی')
+        self.apply('new_player', name='علی نمونه آزمایشی')
+        self.apply('new_player', name='علیرضا نمونه آزمایشی')
         self.assertEqual(self.service.duplicate_players(), [])
         # The guard must not block a genuinely different given name either.
         with self.db.conn:
@@ -1731,25 +1731,25 @@ class PlayerIdentityTests(BaseCase):
         self.assertEqual(created['name'], 'مهدی نمونه آزمایشی')
 
     def test_duplicate_pairs_keep_the_record_with_history(self):
-        self.apply('new_player', name='سید امین هاشمی')
+        self.apply('new_player', name='امین هاشمی')
         self.apply('new_player', name='هاشمی')
         self.apply('new_session', title='سانس', when_text='فردا ساعت ۲۱')
         self.apply('attendance', session=1, player=self.player_id('هاشمی'))
         pairs = self.service.duplicate_players()
         self.assertEqual(len(pairs), 1)
         self.assertEqual(pairs[0]['keep']['name'], 'هاشمی')
-        self.assertEqual(pairs[0]['drop']['name'], 'سید امین هاشمی')
+        self.assertEqual(pairs[0]['drop']['name'], 'امین هاشمی')
 
     def test_ensure_player_asks_before_creating_a_similar_name(self):
-        self.apply('new_player', name='محمد مهدی موحد')
+        self.apply('new_player', name='محمد احمدی')
         with self.assertRaises(UserError) as caught:
-            self.service.ensure_player('موحد')
-        self.assertIn('محمد مهدی موحد', str(caught.exception))
-        self.assertIsNone(self.db.one('SELECT 1 FROM players WHERE normalized_name=?', (normalize('موحد'),)))
+            self.service.ensure_player('احمدی')
+        self.assertIn('محمد احمدی', str(caught.exception))
+        self.assertIsNone(self.db.one('SELECT 1 FROM players WHERE normalized_name=?', (normalize('احمدی'),)))
 
         with self.db.conn:
-            created = self.service.ensure_player('موحد', allow_similar=True)
-        self.assertEqual(created['name'], 'موحد')
+            created = self.service.ensure_player('احمدی', allow_similar=True)
+        self.assertEqual(created['name'], 'احمدی')
         self.assertEqual(self.db.one('SELECT COUNT(*) n FROM players')['n'], 2)
 
 
@@ -4305,7 +4305,7 @@ class LinkCandidateTests(BaseCase):
         self.seed()
         self.apply('new_player', name='حسن رضایی')
         self.apply('new_player', name='مهمان نواز')
-        self.apply('new_player', name='مشهدی')
+        self.apply('new_player', name='مهمان دو')
 
         pairs = self.service.link_candidates()
 

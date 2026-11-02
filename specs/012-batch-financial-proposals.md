@@ -137,7 +137,7 @@ git diff --check
 - `python3 -m compileall -q app tests`: OK.
 - `git diff --check`: clean.
 - Live `agent_logs` #581 and the bot log confirm the old failure («بازیکن پیدا
-  نشد» for `players="مهدی روستایی, امیرحسین زارعی, ..."`); the same call now
+  نشد» for `players="مهدی رستمی, علی رضایی, ..."`); the same call now
   builds one card.
 
 - No change to ledger semantics, `Service.prepare`, `Service.apply`, or the

@@ -100,11 +100,11 @@ git diff --check
 ## Notes
 
 The live incident on 2026-10-19 was `HTTP 402` from the configured primary
-model while `deepseek-v4.1-flash` answered normally on the same endpoint, so the
+model while `primary-model` answered normally on the same endpoint, so the
 operational configuration now sets:
 
 ```text
-AI_FALLBACK_MODEL=deepseek-v4.1-flash
+AI_FALLBACK_MODEL=primary-model
 ```
 
 The primary model is still tried first, which costs one fast failed request per
