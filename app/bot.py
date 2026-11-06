@@ -739,8 +739,11 @@ class Bot:
         if not isinstance(commands, list) or not 1 <= len(commands) <= 30:
             raise UserError('هر کارت بین ۱ تا ۳۰ دستور می‌پذیرد.')
         # Duplicate targets in a batch are almost always a parsing mistake.
+        # SPEC-053: a link pair's target is the *pair*, so two links that share
+        # one player («الف↔ب» and «الف↔ج») are different requests, not a repeat.
         targets = [(c['action'], c['args'].get('session'), c['args'].get('player'),
-                    normalize(c['args'].get('name', ''))) for c in commands]
+                    c['args'].get('partner'), normalize(c['args'].get('name', '')))
+                   for c in commands]
         if len(set(targets)) != len(targets):
             raise UserError('درخواست مورد تکراری دارد؛ لطفاً اصلاح کنید.')
         ident = self.new_pending('commands', commands, user_id, chat_id)
@@ -793,6 +796,39 @@ class Bot:
         else:
             commands = [self.service.prepare(command['action'], command.get('args', {}))]
         return self.propose_commands(commands, user_id, chat_id)
+
+    def deliver_undelivered_cards(self, chat_id, markup, since):
+        """Send any approval card the answer failed to carry (SPEC-053).
+
+        A card row is written *before* the reply that carries its buttons, so a
+        code path that forgets the markup leaves an approvable proposal nobody
+        can click.  Live proof: «سید امین طاهری را با سید مجتبی طاهری لینک کن»
+        answered «تأیید را بزنید» while `player_link` #24 ↔ #20 had no button and
+        no delivered message at all.
+
+        Only the admin group is swept.  `pending.chat_id` is the *requester's*
+        chat, not where the card went (a player's declaration is filed in his own
+        chat and delivered to the admin group), so sweeping any other chat would
+        leak an admin card into a private conversation.  A card that was already
+        delivered is skipped by its recorded ``message_id``; the card the answer
+        itself carried is skipped too.  Returns the ids that had to be sent here.
+        """
+        if chat_id != self.config.admin_group:
+            return []
+        carried = self.card_ref(markup) or ''
+        rows = self.db.all(
+            "SELECT * FROM pending WHERE kind='commands' AND status='pending' "
+            "AND chat_id=? AND message_id IS NULL AND created_at>=? ORDER BY created_at",
+            (chat_id, int(since)))
+        sent = []
+        for row in rows:
+            if carried == 'proposal:' + row['id']:
+                continue
+            buttons_markup = buttons('yes:' + row['id'], 'no:' + row['id'])
+            self.db.say(chat_id, self.pending_summary(row), buttons_markup,
+                        self.card_ref(buttons_markup))
+            sent.append(row['id'])
+        return sent
 
     def context(self, chat_id, user_id, admin, reply_to=None):
         state, _ = self.db.conversation(chat_id, user_id)
@@ -927,6 +963,9 @@ class Bot:
                          and self.short_greeting(body, self.config.bot_name, self.db.setting('bot_username')))
         reply, markup = '', None
         keyboard = None
+        # SPEC-053: cards created during this turn are checked at the end, so an
+        # answer that says «تأیید را بزنید» always has a button to press.
+        turn_started = int(time.time())
         try:
             if len(processing_body) > 6000:
                 raise UserError('پیام طولانی است؛ لطفاً در چند پیام کوتاه‌تر بفرستید.')
@@ -1255,6 +1294,9 @@ class Bot:
         # always a fresh message.  The feed is closed only *after* the answer is
         # queued, so a failed removal can never cost the person their reply.
         self.db.say(chat_id, reply, markup, self.card_ref(markup), keyboard=keyboard)
+        # SPEC-053: whatever card this turn created and did not attach to the
+        # answer is delivered now, with its buttons.
+        self.deliver_undelivered_cards(chat_id, markup, turn_started)
         if followup:
             self.db.say(chat_id, followup)
         if progress is not None:
@@ -1771,7 +1813,10 @@ class Bot:
         note = (f'درخواست اتصال {ident}\nبازیکن: #{player["id"]} {player["name"]}\n'
                 f'شناسهٔ داخلی بله: {user_id}\nusername: @{profile_username or "ارسال نشده"}\n'
                 'آیا این حساب به این بازیکن متصل شود؟')
-        self.db.say(self.config.admin_group, note, buttons('yes:' + ident, 'no:' + ident))
+        self.db.say(self.config.admin_group, note, buttons('yes:' + ident, 'no:' + ident),
+                    # SPEC-053: remember where the card landed, so a delivered
+                    # request is never re-sent.
+                    self.card_ref(buttons('yes:' + ident, 'no:' + ident)))
         return 'درخواست اتصال برای تأیید ادمین ثبت شد؛ هنوز حسابی متصل نشده.', buttons('yes:' + ident, 'no:' + ident)
 
     def repair_last_entity(self, chat_id, user_id, commands):
@@ -2099,7 +2144,9 @@ class Bot:
                 f"طرف مقابل: #{partner['id']} {partner['name']}\n"
                 'با تأیید، هر دو نفر گزارش ماندهٔ همدیگر را می‌بینند و می‌توانند برای هم تسویه پیشنهاد دهند؛ '
                 'هیچ پولی خودکار جابه‌جا نمی‌شود.')
-        self.db.say(self.config.admin_group, note, buttons('yes:' + ident, 'no:' + ident))
+        self.db.say(self.config.admin_group, note, buttons('yes:' + ident, 'no:' + ident),
+                    # SPEC-053: record the delivery so the card is not re-sent.
+                    self.card_ref(buttons('yes:' + ident, 'no:' + ident)))
         return ('درخواست پیوند برای تأیید ادمین ارسال شد؛ تا آن زمان هیچ حسابی به هم وصل نیست.',
                 None)
 
@@ -2120,7 +2167,9 @@ class Bot:
         ident = self.new_pending('commands', [command], user_id, chat_id)
         note = (f'درخواست تسویه از طرف {player["name"]} برای حساب پیوندی {partner["name"]}\n'
                 f'کد تأیید: {ident}')
-        self.db.say(self.config.admin_group, note, buttons('yes:' + ident, 'no:' + ident))
+        self.db.say(self.config.admin_group, note, buttons('yes:' + ident, 'no:' + ident),
+                    # SPEC-053: record the delivery so the card is not re-sent.
+                    self.card_ref(buttons('yes:' + ident, 'no:' + ident)))
         return (f'درخواست تسویهٔ «{partner["name"]}» برای تأیید ادمین ارسال شد؛ '
                 'تا تأیید نشود هیچ تغییری در حساب ثبت نمی‌شود.', None)
 
@@ -2161,7 +2210,10 @@ class Bot:
                    else 'درخواست اعلام بدهی')
         self.db.say(self.config.admin_group,
                     f"{heading} از {player['name']}:\n\n" + self.service.preview(command),
-                    buttons('yes:' + ident, 'no:' + ident))
+                    buttons('yes:' + ident, 'no:' + ident),
+                    # SPEC-053: record the delivered message, so the card is
+                    # never re-sent and its buttons can be removed on expiry.
+                    self.card_ref(buttons('yes:' + ident, 'no:' + ident)))
         return (self.service.preview(command) +
                 f'\n\nاین اعلام برای تأیید ادمین ارسال شد. کد: {ident}',
                 None)

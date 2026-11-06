@@ -720,11 +720,16 @@ class SansAgent:
                         preview = service.format_link_candidates(pairs)
                         if not pairs:
                             return preview
-                        for item in pairs[:10]:
-                            bot.propose({'action': 'player_link',
-                                         'args': {'player': item['left']['id'],
-                                                  'partner': item['right']['id']}},
-                                        user_id, chat_id)
+                        # SPEC-053: one card for the whole list, exactly like the
+                        # routed `suggest_links` action.  The markup must reach
+                        # `effects`, or the card exists without its buttons.
+                        commands = [service.prepare('player_link',
+                                                    {'player': item['left']['id'],
+                                                     'partner': item['right']['id']})
+                                    for item in pairs[:10]]
+                        text, markup = bot.propose_commands(commands, user_id, chat_id)
+                        effects['markup'] = markup
+                        effects['proposal_preview'] = text
                         return preview + '\nیک کارت تأیید برای این زوج‌ها ساخته شد؛ بدون تأیید شما پیوندی ساخته نمی‌شود.'
                     if operation == 'links':
                         rows = db.all('SELECT * FROM player_links ORDER BY low_id, high_id')
@@ -744,9 +749,14 @@ class SansAgent:
                         return 'این دو حساب از قبل به هم وصل هستند.'
                     if action == 'player_unlink' and not service.are_linked(left['id'], right['id']):
                         return 'این دو حساب به هم وصل نیستند.'
-                    reply, _ = bot.propose({'action': action,
-                                            'args': {'player': left['id'], 'partner': right['id']}},
-                                           user_id, chat_id)
+                    reply, markup = bot.propose({'action': action,
+                                                 'args': {'player': left['id'], 'partner': right['id']}},
+                                                user_id, chat_id)
+                    # SPEC-053: without this the tool answers «تأیید را بزنید»
+                    # while the card's buttons were thrown away, so the admin had
+                    # nothing to press and the link stayed pending forever.
+                    effects['markup'] = markup
+                    effects['proposal_preview'] = reply
                     return reply
 
                 if operation == 'expire_proposals':
@@ -867,7 +877,8 @@ class SansAgent:
                     preview, markup = bot.propose(cmd, user_id, chat_id)
                     heading = ('درخواست اعلام پرداخت' if parsed is DeclaredDirection.PAID
                                else 'درخواست اعلام بدهی')
-                    db.say(bot.config.admin_group, f"{heading} از {linked['name']}:\n\n" + preview, markup)
+                    db.say(bot.config.admin_group, f"{heading} از {linked['name']}:\n\n" + preview, markup,
+                           bot.card_ref(markup))
                     return ('پیشنهاد اعلام پرداخت برای تأیید به گروه ادمین‌ها ارسال شد. '
                             'تا تأیید نشود از بدهی کم نمی‌شود؛ همین را به کاربر بگو و '
                             'هیچ عدد بدهی جدیدی از خودت نگو.'
