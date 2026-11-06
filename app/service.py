@@ -346,6 +346,11 @@ ADMIN_ACTIONS = {'new_player', 'new_session', 'update_session', 'attendance',
                  # agent tool or an explicit admin command proposes them.
                  'player_link', 'player_unlink'}
 
+# SPEC-054: the actions whose whole point is a balance.  Only these report an
+# amount after approval; every other card reports what that card itself did, so
+# approving «ارسال پیام» never looks like a price change.
+BALANCE_ACTIONS = frozenset({'adjustment', 'settle', 'declare_debt'})
+
 # SPEC-025: a relation word in a name («دوست», «بچه‌های», «شاگرد») or a bare
 # number is not a family name, so it can neither group nor suggest a pair.
 RELATION_WORDS = {'دوست', 'رفیق', 'بچه', 'بچه‌های', 'بچهها', 'پسر', 'دختر', 'برادر',
@@ -1067,6 +1072,13 @@ class Service:
         setting — not a restatement of what was requested.  A command whose
         entity cannot be re-read simply contributes no line; the confirmation
         itself is never affected.
+
+        SPEC-054: the report belongs to the card.  Only a money action
+        (``adjustment``, ``settle``, ``declare_debt``) reports balances; a link
+        card reports the link, a broadcast reports its audience, and identity and
+        session cards report their own state.  Before this, every card listed the
+        affected players' balances, so approving «ارسال پیام» looked like a
+        financial change.
         """
         selected = commands if isinstance(commands, list) else [commands]
         lines = []
@@ -1081,10 +1093,56 @@ class Service:
         return '📋 وضعیت بعد از تغییر:\n' + '\n'.join(f'• {line}' for line in lines)
 
     def _applied_lines(self, command):
-        """Return the report lines of one applied command (SPEC-050)."""
+        """Return the report lines of one applied command (SPEC-050/054)."""
         action = command.get('action')
         args = command.get('args') if isinstance(command.get('args'), dict) else {}
-        out, refs = [], []
+        if action in BALANCE_ACTIONS:
+            return self._balance_lines(args)
+        if action == 'settings' and args.get('key'):
+            key = args['key']
+            label = SETTING_LABELS.get(key, key)
+            return [f"تنظیم «{label}»: {self.setting_display(key, self.db.setting(key))}"]
+        if action == 'broadcast':
+            return self._broadcast_lines()
+        if action in ('player_link', 'player_unlink'):
+            return self._link_lines(action, args)
+        if action == 'new_player' and args.get('name'):
+            row = self.db.one('SELECT * FROM players WHERE normalized_name=?',
+                              (normalize(args['name']),))
+            return [f"بازیکن #{row['id']} «{row['name']}» ثبت شد"] if row else []
+        if action == 'player_rename' and args.get('player'):
+            row = self.db.one('SELECT * FROM players WHERE id=?', (self._ref_id(args['player']),))
+            return [f"نام #{row['id']} الان «{row['name']}» است"] if row else []
+        if action == 'player_note' and args.get('player'):
+            row = self.db.one('SELECT * FROM players WHERE id=?', (self._ref_id(args['player']),))
+            return [f"یادداشت #{row['id']} «{row['name']}» ثبت شد"] if row else []
+        # A session card reports the session, never a player's balance.
+        if args.get('session') is not None or args.get('title'):
+            try:
+                session = self.session(args.get('session') or args.get('title'))
+            except UserError:
+                return []
+            return [self._session_report_line(session)]
+        return []
+
+    @staticmethod
+    def _ref_id(ref):
+        """Return an integer player id, or ``None`` for a name reference."""
+        if isinstance(ref, bool):
+            return None
+        if isinstance(ref, int):
+            return ref
+        if isinstance(ref, str) and ref.strip().lstrip('#').isdigit():
+            return int(ref.strip().lstrip('#'))
+        return None
+
+    def _balance_lines(self, args):
+        """Return one balance line per affected player (SPEC-054).
+
+        Only the money actions call this: the balance is the outcome the admin
+        asked about.  Every other card type has its own line instead.
+        """
+        refs = []
         if args.get('player'):
             refs.append(args['player'])
         players = args.get('players')
@@ -1092,26 +1150,50 @@ class Service:
             players = [item for item in players.split(',') if item.strip()]
         if isinstance(players, (list, tuple)):
             refs.extend(players)
-        if action == 'new_player' and args.get('name'):
-            refs.append(args['name'])
+        if args.get('partner'):
+            refs.append(args['partner'])
+        lines, seen = [], set()
         for ref in refs:
             try:
                 player = self.player(ref)
             except UserError:
                 continue
-            out.append(f"#{player['id']} {player['name']}: مانده {self.balance(player['id']):,} تومان")
-        if args.get('session') is not None or args.get('title'):
+            if player['id'] in seen:
+                continue
+            seen.add(player['id'])
+            lines.append(f"#{player['id']} {player['name']}: مانده {self.balance(player['id']):,} تومان")
+        return lines
+
+    def _link_lines(self, action, args):
+        """Return the pair line of an approved link or unlink (SPEC-054)."""
+        try:
+            left = self.player(args.get('player'))
+            right = self.player(args.get('partner'))
+        except UserError:
+            return []
+        verb = 'پیوند برقرار شد' if action == 'player_link' else 'پیوند برداشته شد'
+        return [f"#{left['id']} {left['name']} ↔ #{right['id']} {right['name']}: {verb}"]
+
+    def _broadcast_lines(self):
+        """Return the audience line of an approved broadcast (SPEC-054).
+
+        The count is read from the audit row ``apply`` just wrote for this
+        broadcast.  A message card must never display a balance: it moved no
+        money, and showing one made the admin think a price had changed.
+        """
+        row = self.db.one("SELECT details FROM audit_logs WHERE action='broadcast' "
+                          "ORDER BY id DESC LIMIT 1")
+        recipients = None
+        if row:
             try:
-                session = self.session(args.get('session') or args.get('title'))
-            except UserError:
-                pass
-            else:
-                out.append(self._session_report_line(session))
-        if args.get('key'):
-            key = args['key']
-            label = SETTING_LABELS.get(key, key)
-            out.append(f"تنظیم «{label}»: {self.db.setting(key) or '—'}")
-        return out
+                details = json.loads(row['details'])
+            except (TypeError, ValueError):
+                details = {}
+            if isinstance(details, dict):
+                recipients = details.get('recipients')
+        if isinstance(recipients, bool) or not isinstance(recipients, int) or recipients <= 0:
+            return []
+        return [f'متن پیام برای {recipients} مخاطب در صف ارسال قرار گرفت']
 
     def _session_report_line(self, session):
         """Return one line describing a session's stored state (SPEC-050)."""
