@@ -549,6 +549,12 @@ class SansAgent:
                         else:
                             continue
                         created.append(f"#{p['id']} {p['name']}")
+                        # SPEC-052: if an identity request is waiting for this
+                        # name, creating the player turns it into an approvable
+                        # card instead of leaving it buttonless.
+                        attached = bot.attach_claims(p, user_id)
+                        if attached:
+                            created[-1] += ' — کارت اتصال حساب با دکمهٔ تأیید ارسال شد'
                         effects['last_player_id'] = p['id']
                     return 'بازیکنان ثبت/به‌روز شدند: ' + ('، '.join(created) if created else 'موردی نبود')
 

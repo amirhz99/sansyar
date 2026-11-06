@@ -1432,12 +1432,18 @@ class Bot:
         ident = self.new_pending('identity' if player else 'claim', payload, user_id, chat_id)
         similar = [] if player else self.service.similar_players(name)[:3]
         note = self.identity_note(ident, payload, player, similar)
-        markup = None
         if player:
             markup = buttons('yes:' + ident, 'no:' + ident)
         else:
-            note += (f'\nتطبیق قطعی با بازیکن‌های ثبت‌شده پیدا نشد؛ باید بازیکن را دستی بسازید و بعد پیوند بزنید.'
-                     f'\nشناسهٔ درخواست: {ident} — نام مورد نظر: {name}')
+            # SPEC-052: the card is actionable even before the player exists.
+            # One click creates the player with the declared name and sends the
+            # approve card back, so nobody has to remember this request code.
+            note += ('\nاین نام در فهرست بازیکنان نیست. اگر این فرد بازیکن تازه‌ای است، این دکمه '
+                     'او را می‌سازد و همین کارت با دکمهٔ تأیید برمی‌گردد: «ساخت بازیکن و اتصال». '
+                     'اگر بازیکن از قبل ساخته شده، همین حالا کارت تازه با دکمهٔ تأیید آمده است.\n'
+                     f'شناسهٔ درخواست: {ident} — نام مورد نظر: {name}')
+            markup = [[{'text': 'ساخت بازیکن و اتصال', 'callback_data': 'mk:' + ident},
+                       {'text': 'رد', 'callback_data': 'no:' + ident}]]
         self.db.say(self.config.admin_group, note, markup)
         return 'معرفی شما برای بررسی به ادمین‌ها ارسال شد؛ بعد از تأیید، بدهی حساب خودتان قابل مشاهده است.'
 
@@ -1623,6 +1629,76 @@ class Bot:
         self.db.execute("UPDATE pending SET kind='identity',payload=? WHERE id=?", (dumps(payload), ident))
         return (self.identity_note(ident, payload, player) + '\nآیا این حساب به این بازیکن متصل شود؟',
                 buttons('yes:' + ident, 'no:' + ident))
+
+    def attach_claims(self, player, actor=None):
+        """Turn every pending claim naming this player into an approvable card.
+
+        SPEC-052: a claim is filed when an identity request names nobody on
+        file, and it carries no buttons because there is nothing to approve
+        yet.  Creating the player the request named — the exact step the card
+        asks for — left the claim untouched, so the card stayed buttonless and
+        the account stayed unlinked until somebody remembered the request code
+        and typed ``/link``.  Attaching here means the approve button appears
+        as soon as the player exists, from whichever path created it.
+
+        Only an exactly equal normalized name is attached; a merely similar
+        name stays a human decision, exactly as ``/link`` leaves it.
+
+        Returns the ids of the cards that were rewritten and re-sent.
+        """
+        if not player or not player['normalized_name']:
+            return []
+        attached = []
+        rows = self.db.all("SELECT id,payload FROM pending WHERE kind='claim' "
+                           "AND status='pending' ORDER BY created_at")
+        for row in rows:
+            try:
+                payload = json.loads(row['payload'])
+            except (TypeError, ValueError):
+                continue
+            if not isinstance(payload, dict):
+                continue
+            if normalize(payload.get('name') or '') != player['normalized_name']:
+                continue
+            payload['player'] = player['id']
+            self.db.execute("UPDATE pending SET kind='identity',payload=? "
+                            "WHERE id=? AND status='pending'", (dumps(payload), row['id']))
+            markup = buttons('yes:' + row['id'], 'no:' + row['id'])
+            self.db.say(self.config.admin_group,
+                        self.identity_note(row['id'], payload, player) +
+                        '\nآیا این حساب به این بازیکن متصل شود؟',
+                        markup, self.card_ref(markup))
+            attached.append(row['id'])
+        if attached and actor is not None:
+            self.db.audit(actor, 'claim_attached', {'player': player['id'], 'cards': attached})
+        return attached
+
+    def claim_create(self, ident, actor):
+        """Create the player a claim names and hand the admin the card (SPEC-052).
+
+        The claim card carries this as a button, so the admin never has to
+        remember a request code: one click creates the player with the declared
+        name, rewrites the claim into an ``identity`` card, and sends that card
+        back with the approve button.  A name that already exists is reused
+        instead of duplicated, and a name ``ensure_player`` refuses (too close
+        to an existing player) fails closed with its own explanation.
+        """
+        ident = text(ident, 'کد درخواست', limit=32)
+        row = self.db.one("SELECT * FROM pending WHERE id=? AND status='pending' AND kind='claim'", (ident,))
+        if not row:
+            raise UserError('درخواست هویت منتظر پیدا نشد؛ شاید قبلاً بررسی شده است.')
+        try:
+            payload = json.loads(row['payload'])
+        except (TypeError, ValueError):
+            raise UserError('اطلاعات این درخواست خوانا نیست؛ از متقاضی بخواهید دوباره /identify بفرستد.') from None
+        if not isinstance(payload, dict) or not payload.get('name'):
+            raise UserError('نام اعلام‌شده در این درخواست خالی است؛ از متقاضی بخواهید دوباره /identify بفرستد.')
+        player = self.service.ensure_player(payload['name'], actor=actor)
+        if not self.attach_claims(player, actor):
+            # The claim was resolved between the click and this line.
+            raise UserError('این درخواست همین حالا بررسی شد؛ کارت آن را ببینید.')
+        return (f"بازیکن #{player['id']} {player['name']} ساخته و به درخواست {ident} وصل شد.\n"
+                'کارت شناسایی با دکمهٔ تأیید فرستاده شد؛ برای اتصال حساب همان دکمه را بزنید.')
 
     @staticmethod
     def _profile_user(profile):
@@ -1922,6 +1998,15 @@ class Bot:
                     for player in self.db.all('''SELECT p.id,p.bale_id FROM attendance a JOIN players p ON p.id=a.player_id
                                                 WHERE a.session_id=? AND p.bale_id IS NOT NULL''', (command['args']['session'],)):
                         self.db.say(player['bale_id'], 'حساب سانس ثبت شد.\n' + self.service.debt(player['id']))
+            # SPEC-052: a just-approved new player may be the person an open
+            # claim is waiting for, so the claim becomes a clickable card now.
+            for command in payload:
+                if command['action'] != 'new_player':
+                    continue
+                created = self.db.one('SELECT * FROM players WHERE normalized_name=?',
+                                      (normalize(command['args']['name']),))
+                if created:
+                    self.attach_claims(created, actor)
             if not settings_change and not any(c.get('action') == 'broadcast' for c in payload):
                 self.ask_missing()
         if settings_change:
@@ -2141,6 +2226,10 @@ class Bot:
                 # confirmation carries the resulting state and not only "done".
                 if kind == 'yes':
                     report = self.applied_report(ident)
+            elif kind == 'mk':
+                # SPEC-052: the claim card itself creates the player it names,
+                # so a brand-new name is one click away from a linkable card.
+                result = self.claim_create(ident, user_id)
             elif kind in ('pay', 'reject'):
                 result = self.review(integer(ident, 'شناسهٔ رسید', 1), kind == 'pay', user_id)
                 if kind == 'pay':
