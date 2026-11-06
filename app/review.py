@@ -45,6 +45,22 @@ TRUNCATED_RESULT = 795
 DIGITS = str.maketrans('۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩', '01234567890123456789')
 REPORT_RETENTION_DAYS = 30
 
+# SPEC-055: the health block is read by a human, so every check carries a Persian
+# label and the state is spelled out instead of being an English token.
+CHECK_LABELS = {
+    'DB': 'دیتابیس',
+    'QUEUE': 'صف ارسال',
+    'CARDS': 'کارت‌های منتظر',
+    'TICK': 'ضربان ربات',
+    'LLM': 'مدل هوش مصنوعی',
+    'BACKUP': 'بکاپ',
+    'DISK': 'فضای دیسک',
+    'GROUP': 'گروه مدیریتی',
+}
+STATUS_WORDS = {'OK': 'سالم', 'WARN': 'هشدار', 'FAIL': 'خطا'}
+HEALTH_LEGEND = ('راهنما — سالم: بی‌اشکال | هشدار: جای نگاه دارد ولی ربات کار می‌کند | '
+                 'خطا: چیزی خراب است و همان‌جا نوشته چه باید کرد.')
+
 
 def _connect(path):
     """Open the database read-only: the bot may be running and writing."""
@@ -152,29 +168,69 @@ def _human_bytes(value):
         value /= 1024
 
 
+def _human_duration(seconds):
+    """Return a short Persian duration: «۴۵ ثانیه», «۱۲ دقیقه», «۳ ساعت»."""
+    seconds = max(0.0, float(seconds or 0))
+    if seconds < 90:
+        return f'{int(seconds)} ثانیه'
+    if seconds < 90 * 60:
+        return f'{int(seconds / 60)} دقیقه'
+    if seconds < 48 * 3600:
+        return f'{int(seconds / 3600)} ساعت'
+    return f'{int(seconds / 86400)} روز'
+
+
 def health(db_path, configured_group=None):
-    """Return the health lines ``(name, status, detail)`` for one installation."""
+    """Return the health lines ``(name, status, detail)`` for one installation.
+
+    SPEC-055: every line is written for a human reader — a Persian label, a plain
+    sentence about what was measured, and the action to take when it is not
+    ``OK``.  The ``status`` values stay ``OK``/``WARN``/``FAIL`` so callers keep
+    their contract.
+
+    The queue line used to compare ``MIN(next_attempt)`` with the clock, but
+    ``next_attempt`` is ``0`` for a message that was just queued and never
+    attempted.  A brand-new row therefore looked 56 years overdue, and the daily
+    report said ``FAIL`` with «oldest overdue 1793873755s» although nothing was
+    wrong.  A row that was never tried is now simply «waiting».
+    """
     path = Path(db_path)
     checks = []
 
-    def add(name, status, detail):
-        checks.append({'name': name, 'status': status, 'detail': detail})
+    def add(name, status, detail, advice=''):
+        checks.append({'name': name, 'status': status, 'detail': detail,
+                       'label': CHECK_LABELS.get(name, name), 'advice': advice})
 
     if not path.exists():
-        add('DB', 'FAIL', 'database file is missing')
+        add('DB', 'FAIL', 'فایل دیتابیس پیدا نشد',
+            'مسیر DATABASE_PATH را بررسی کنید و از بکاپ آخر بازگردانید')
         return checks
     conn = _connect(path)
     try:
         verdict = conn.execute('PRAGMA quick_check').fetchone()[0]
         add('DB', 'OK' if verdict == 'ok' else 'FAIL',
-            f"{verdict} | WAL {_human_bytes(_size(str(path) + '-wal'))}")
+            (f'پرونده سالم است | WAL {_human_bytes(_size(str(path) + "-wal"))}'
+             if verdict == 'ok' else f'آزمای سلامت پرونده شکست خورد: {verdict}'),
+            'بکاپ آخر را نگه دارید و فایل دیتابیس را بررسی کنید')
 
-        row = conn.execute('SELECT COUNT(*) n, MIN(next_attempt) oldest FROM outbox').fetchone()
-        backlog, overdue = int(row['n'] or 0), 0.0
-        if row['oldest'] is not None:
-            overdue = max(0.0, time.time() - float(row['oldest']))
-        status = 'FAIL' if backlog > 50 or overdue > 1800 else 'WARN' if backlog > 20 or overdue > 600 else 'OK'
-        add('QUEUE', status, f'outbox {backlog} rows | oldest overdue {int(overdue)}s')
+        row = conn.execute('SELECT COUNT(*) n, MAX(attempts) top, '
+                           'MIN(CASE WHEN next_attempt > 0 THEN next_attempt END) soonest '
+                           'FROM outbox').fetchone()
+        backlog, top = int(row['n'] or 0), int(row['top'] or 0)
+        wait = 0.0
+        if row['soonest'] is not None:
+            wait = max(0.0, float(row['soonest']) - time.time())
+        status = ('FAIL' if backlog > 50 or top >= 5
+                  else 'WARN' if backlog > 20 or top else 'OK')
+        if not backlog:
+            detail = 'صف خالی است؛ هیچ پیامی منتظر ارسال نیست'
+        elif top:
+            detail = (f'{backlog} پیام در صف؛ یکی از آن‌ها {top} بار ناموفق بوده'
+                      + (f' و تلاش بعدی {_human_duration(wait)} دیگر است' if wait else ''))
+        else:
+            detail = f'{backlog} پیام تازه در صف؛ در دور بعدی ربات ارسال می‌شود'
+        add('QUEUE', status, detail,
+            'اتصال به بله و توکن ربات را بررسی کنید؛ پیام‌ها از صف پاک نمی‌شوند و بعد فرستاده می‌شوند')
 
         row = conn.execute("SELECT COUNT(*) n, MIN(created_at) oldest FROM pending "
                            "WHERE status='pending'").fetchone()
@@ -186,15 +242,20 @@ def health(db_path, configured_group=None):
                 age_h = max(0.0, (datetime.now(timezone.utc) - created).total_seconds() / 3600)
             except ValueError:
                 age_h = 0.0
-        add('CARDS', 'WARN' if age_h > 24 else 'OK', f'{open_cards} open | oldest {age_h:.0f}h')
+        add('CARDS', 'WARN' if age_h > 24 else 'OK',
+            ('هیچ کارتی منتظر تأیید نیست' if not open_cards else
+             f'{open_cards} کارت منتظر تأیید | قدیمی‌ترین {_human_duration(age_h * 3600)}'),
+            'کارت‌های قدیمی را با /expire ببندید یا تأیید/رد کنید')
 
         tick = conn.execute("SELECT value FROM settings WHERE key='last_tick'").fetchone()
         age = _age_since(tick['value']) if tick else None
         if age is None:
-            add('TICK', 'WARN', 'no heartbeat yet')
+            add('TICK', 'WARN', 'ربات هنوز هیچ ضربانی ثبت نکرده است',
+                'اگر ربات تازه راه افتاده، چند دقیقه بعد دوباره بررسی کنید')
         else:
             status = 'FAIL' if age > 900 else 'WARN' if age > 300 else 'OK'
-            add('TICK', status, f'last loop {int(age)}s ago')
+            add('TICK', status, f'آخرین دور {_human_duration(age)} پیش',
+                'ربات اجرا نیست یا گیر کرده؛ سرویس را ری‌استارت کنید')
 
         cutoff = "datetime('now','-1 day')"
         counts = {row['event']: row['n'] for row in conn.execute(
@@ -207,8 +268,11 @@ def health(db_path, configured_group=None):
         p50 = durations[len(durations) // 2] if durations else 0
         p90 = durations[min(len(durations) - 1, int(len(durations) * 0.9))] if durations else 0
         add('LLM', 'WARN' if failed >= 5 else 'OK',
-            f"24h: retry {counts.get('LLM_RETRY', 0)}, empty {counts.get('LLM_EMPTY', 0)}, "
-            f"fallback {counts.get('LLM_FALLBACK', 0)} | p50 {p50 // 1000}s, p90 {p90 // 1000}s")
+            f'۲۴ ساعت: {counts.get("LLM_RETRY", 0)} تلاش دوباره، '
+            f'{counts.get("LLM_EMPTY", 0)} پاسخ خالی، '
+            f'{counts.get("LLM_FALLBACK", 0)} مدل جایگزین | '
+            f'پاسخ‌ها: میانه {_human_duration(p50 / 1000)}، کندترین‌ها {_human_duration(p90 / 1000)}',
+            'سرویس مدل ناپایدار است؛ اگر ادامه داشت کلید و آدرس مدل را بررسی کنید')
         if configured_group:
             # SPEC-051: a wrong ADMIN_GROUP_ID makes the bot silent in the group
             # while everything else looks healthy.  Compare the configured id with
@@ -218,31 +282,36 @@ def health(db_path, configured_group=None):
                 "AND created_at >= datetime('now','-7 days')").fetchall()
             seen = [int(row['chat_id']) for row in rows]
             if int(configured_group) in seen:
-                add('GROUP', 'OK', f'configured group {configured_group} has traffic')
+                add('GROUP', 'OK', f'گروه مدیریتی {configured_group} پیام می‌فرستد')
             else:
                 add('GROUP', 'WARN',
-                    f'no message from configured group {configured_group} in 7d '
-                    f'(chats seen: {len(seen)})')
+                    f'در ۷ روز گذشته هیچ پیامی از گروه {configured_group} نرسیده '
+                    f'(تعداد گروه‌های دیده‌شده: {len(seen)})',
+                    'مقدار ADMIN_GROUP_ID در .env و عضویت ربات در گروه را بررسی کنید')
     finally:
         conn.close()
 
     backups = sorted((path.parent / 'backups').glob('*.sqlite3'),
                      key=lambda item: item.stat().st_mtime)
     if not backups:
-        add('BACKUP', 'WARN', 'no backup file found')
+        add('BACKUP', 'WARN', 'هیچ فایل بکاپی پیدا نشد',
+            'backup_db.py را اجرا کنید تا بکاپ روزانه ساخته شود')
     else:
         newest = backups[-1]
         hours = (time.time() - newest.stat().st_mtime) / 3600
         add('BACKUP', 'FAIL' if hours > 7 * 24 else 'WARN' if hours > 36 else 'OK',
-            f'{newest.name} | {hours:.0f}h ago')
+            f'آخرین بکاپ {newest.name} | {_human_duration(hours * 3600)} پیش',
+            'بکاپ روزانه اجرا نشده؛ سرویس بکاپ را بررسی کنید')
 
     try:
         usage = shutil.disk_usage(str(path.parent))
         free = usage.free / usage.total * 100
     except OSError:
-        add('DISK', 'WARN', 'disk usage unavailable')
+        add('DISK', 'WARN', 'فضای دیسک قابل خواندن نبود')
     else:
-        add('DISK', 'FAIL' if free < 5 else 'WARN' if free < 10 else 'OK', f'{free:.0f}% free')
+        add('DISK', 'FAIL' if free < 5 else 'WARN' if free < 10 else 'OK',
+            f'{free:.0f}٪ فضا آزاد است',
+            'لاگ‌ها و بکاپ‌های قدیمی را پاک کنید یا فضای سرور را بیشتر کنید')
     return checks
 
 
@@ -254,10 +323,37 @@ def summarise(checks):
     return 'OK'
 
 
+def verdict_text(checks):
+    """Return one plain Persian sentence about the overall state (SPEC-055)."""
+    worst = summarise(checks)
+    failing = [check for check in checks if check['status'] == 'FAIL']
+    warning = [check for check in checks if check['status'] == 'WARN']
+    if worst == 'OK':
+        return 'همه‌چیز سالم است؛ کاری لازم نیست'
+    if worst == 'FAIL':
+        names = '، '.join(check['label'] for check in failing)
+        return f'{len(failing)} مورد خراب است ({names}) و باید رسیدگی شود'
+    names = '، '.join(check['label'] for check in warning)
+    return f'{len(warning)} مورد نیاز به نگاه دارد ({names})؛ کار فوری نیست'
+
+
 def render_health(checks):
-    """Return the short ``--doctor`` block."""
-    lines = [f"{check['name']:<7} {check['status']:<4} {check['detail']}" for check in checks]
-    lines.append(f"RESULT  {summarise(checks)}")
+    """Return the readable health block for ``--doctor`` and the report (SPEC-055).
+
+    The block keeps the shape the operator already knows — one line per check and
+    a verdict line at the end — but every word is Persian, and a line that is not
+    ``OK`` carries the action to take.  So «خطا» is never shown without saying
+    what it means and what to do about it.
+    """
+    width = max((len(check.get('label') or check['name']) for check in checks), default=8)
+    lines = []
+    for check in checks:
+        label = check.get('label') or check['name']
+        word = STATUS_WORDS.get(check['status'], check['status'])
+        lines.append(f'{label:<{width}}  {word:<5} {check["detail"]}')
+        if check.get('advice') and check['status'] != 'OK':
+            lines.append(f'{"":<{width}}  ↳ {check["advice"]}')
+    lines.append(f'{"نتیجه":<{width}}  {STATUS_WORDS[summarise(checks)]:<5} {verdict_text(checks)}')
     return '\n'.join(lines)
     return [_enrich(turn) for turn in _turns(rows)]
 def _sample(turn, evidence=''):
@@ -514,23 +610,30 @@ def detect(db_path, days=7, turns=None):
     findings.sort(key=lambda item: (order.get(item['priority'], 3), -item['count']))
     return [finding for finding in findings if finding['count']]
 def digest_text(checks, findings, days=1):
-    """Return the short message for the admin group: numbers only, no user text."""
-    parts = {check['name']: check for check in checks}
-    llm = parts.get('LLM', {}).get('detail', '-')
-    queue = parts.get('QUEUE', {}).get('detail', '-')
-    cards = parts.get('CARDS', {}).get('detail', '-')
-    backup = parts.get('BACKUP', {}).get('detail', '-')
-    top = '، '.join(f"{item['title']} ({item['count']})" for item in findings[:4]) or 'موردی نبود'
+    """Return the short message for the admin group: numbers only, no user text.
+
+    SPEC-055: the digest used to say «وضعیت کلی: FAIL» and then a wall of English
+    tokens such as «outbox 1 rows | oldest overdue 1793873755s».  It now leads with
+    a sentence a human can act on, lists only the lines that are not سالم, and
+    still carries no user text.
+    """
+    worst = summarise(checks)
     total = sum(item['count'] for item in findings)
-    return '\n'.join([
-        f'📊 گزارش {days} روز گذشته ربات',
-        f'وضعیت کلی: {summarise(checks)}',
-        f'مدل: {llm}',
-        f'صف ارسال: {queue} | کارت باز: {cards}',
-        f'بکاپ: {backup}',
-        f'یافته‌ها: {total} مورد — {top}',
-        'شرح کامل و شاهدها روی سرور در data/reports/ است.',
-    ])
+    lines = [f'📊 گزارش {days} روز گذشتهٔ ربات', f'وضعیت کلی: {STATUS_WORDS[worst]} — {verdict_text(checks)}']
+    for check in checks:
+        if check['status'] == 'OK':
+            continue
+        line = f"• {check['label']}: {check['detail']}"
+        if check.get('advice'):
+            line += f"\n   ↳ {check['advice']}"
+        lines.append(line)
+    if worst == 'OK':
+        lines.append('همهٔ بخش‌ها سالم‌اند.')
+    top = '، '.join(f"{item['title']} ({item['count']})" for item in findings[:4])
+    lines.append(f'کارهای امروز: {total} مورد' + (f' — {top}' if top else ' — چیزی پیدا نشد ✅'))
+    lines.append(HEALTH_LEGEND)
+    lines.append('شرح کامل با شاهدها روی سرور در data/reports/ است.')
+    return '\n'.join(lines)
 
 
 def report_text(checks, findings, days=1, now=None):
@@ -538,8 +641,17 @@ def report_text(checks, findings, days=1, now=None):
     moment = (now or datetime.now(TEHRAN)).strftime('%Y-%m-%d %H:%M')
     total = sum(item['count'] for item in findings)
     lines = [f'# گزارش رصد ربات — {days} روز منتهی به {moment}', '',
-             '## وضعیت سلامت', '```', render_health(checks), '```', '',
-             f'## یافته‌ها — {total} مورد در {len(findings)} الگو', '']
+             '## وضعیت به زبان ساده', '',
+             f'- **{STATUS_WORDS[summarise(checks)]}** — {verdict_text(checks)}.',
+             f'- {HEALTH_LEGEND}']
+    for check in checks:
+        if check['status'] == 'OK':
+            continue
+        lines.append(f"- **{check['label']}** ({STATUS_WORDS[check['status']]}): "
+                     f"{check['detail']}"
+                     + (f" — چه کار کنم: {check['advice']}" if check.get('advice') else ''))
+    lines += ['', '## وضعیت سلامت (جدول کامل)', '```', render_health(checks), '```', '',
+              f'## یافته‌ها — {total} مورد در {len(findings)} الگو', '']
     if not findings:
         lines += ['موردی پیدا نشد. ✅', '']
     for index, finding in enumerate(findings, 1):
