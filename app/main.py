@@ -163,6 +163,16 @@ def flush_outbox(db, client, limit=20, pace=0.15):
                 if pace:
                     time.sleep(pace)
                 continue
+            if row['method'] == 'editMessageReplyMarkup' and exc.code in (400, 403):
+                # SPEC-056: the card is deleted, already closed, or not ours to
+                # edit.  No retry can fix that, and a stuck row would stall every
+                # later message behind it.
+                with db.conn:
+                    db.execute('DELETE FROM outbox WHERE id=?', (row['id'],))
+                LOG.warning('Outbox %s editMessageReplyMarkup dropped (%s)', row['id'], exc)
+                if pace:
+                    time.sleep(pace)
+                continue
             if row['method'] == 'editMessageText':
                 # Editing is a presentation optimization. If it is rejected
                 # (for example because the provider no longer considers the

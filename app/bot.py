@@ -201,6 +201,16 @@ def buttons(yes, no):
     return [[{'text': 'تأیید', 'callback_data': yes}, {'text': 'رد', 'callback_data': no}]]
 
 
+# SPEC-056: a card that has been answered says so in its own last line, so a
+# decided card can never be mistaken for an open one.
+CARD_APPROVED = '✅ تأیید شد'
+CARD_REJECTED = '❌ رد شد'
+CARD_CREATED = '✅ بازیکن ساخته شد'
+# The provider refuses a text longer than this; a card that would grow past it
+# only loses its keyboard.
+CARD_TEXT_LIMIT = 4096
+
+
 class Bot:
     def __init__(self, db, config, ai):
         self.db, self.config, self.ai = db, config, ai
@@ -829,6 +839,76 @@ class Bot:
                         self.card_ref(buttons_markup))
             sent.append(row['id'])
         return sent
+
+    def retire_card(self, chat_id, message_id, status, original_text=None):
+        """Take the buttons off a decided card and stamp its outcome (SPEC-056).
+
+        A decided card looked exactly like an open one, so the admin kept
+        pressing cards that had already been approved or rejected.  The clicked
+        message is the one handle on the card: the callback payload carries its
+        chat, its id and its text, so the card can be stamped without storing
+        the text or adding a column.  When the text is unknown the keyboard is
+        still removed, which is what the expiry sweep already does.
+
+        Presentation only: nothing here touches a player, a session, the ledger
+        or a pending row, and no failure can undo a decision that is committed.
+        """
+        if not (_valid_int(chat_id) and _valid_id(message_id)):
+            return False
+        text = original_text.strip() if isinstance(original_text, str) else ''
+        if text and status:
+            if text.endswith(status):
+                # Already stamped: the keyboard is gone with it.
+                return True
+            stamped = f'{text}\n\n{status}'
+            if len(stamped) <= CARD_TEXT_LIMIT:
+                self.db.queue('editMessageText', {
+                    'chat_id': chat_id, 'message_id': message_id, 'text': stamped,
+                    'reply_markup': {'inline_keyboard': []}})
+                return True
+        self.db.queue('editMessageReplyMarkup', {
+            'chat_id': chat_id, 'message_id': message_id,
+            'reply_markup': {'inline_keyboard': []}})
+        return True
+
+    @staticmethod
+    def card_source(callback):
+        """Return the clicked card's chat, id and text (SPEC-056).
+
+        The provider is untrusted input: a missing message, a malformed chat or
+        a non-string text degrades to "no text", never to an exception.
+        """
+        message = callback.get('message') if isinstance(callback, dict) else None
+        if not isinstance(message, dict):
+            return {}
+        chat = message.get('chat')
+        text = message.get('text')
+        return {'chat_id': chat.get('id') if isinstance(chat, dict) else None,
+                'message_id': message.get('message_id'),
+                'text': text if isinstance(text, str) else None}
+
+    def card_target(self, row):
+        """Return ``(chat_id, message_id)`` of a delivered proposal card (SPEC-056)."""
+        message_id = row['message_id']
+        if not _valid_id(message_id):
+            return None, None
+        # SPEC-053: every proposal card is delivered to the management group, so
+        # a request filed in a player's private chat must not redirect the edit.
+        chat_id = row['chat_id']
+        if chat_id != self.config.admin_group:
+            chat_id = self.config.admin_group
+        return chat_id, message_id
+
+    def close_card(self, row, approve, source=None):
+        """Stamp and close the proposal card a decision answered (SPEC-056)."""
+        status = CARD_APPROVED if approve else CARD_REJECTED
+        source = source if isinstance(source, dict) else {}
+        chat_id, message_id = source.get('chat_id'), source.get('message_id')
+        text = source.get('text')
+        if not (_valid_int(chat_id) and _valid_id(message_id)):
+            chat_id, message_id = self.card_target(row)
+            text = None
+        return self.retire_card(chat_id, message_id, status, text)
 
     def context(self, chat_id, user_id, admin, reply_to=None):
         state, _ = self.db.conversation(chat_id, user_id)
@@ -1993,7 +2073,7 @@ class Bot:
             raise UserError('از زمان ساخت این کارت، مانده یا اطلاعات مرتبط تغییر کرده است؛ '
                             'برای دیدن وضعیت تازه دوباره درخواست بدهید.')
 
-    def confirm(self, ident, approve, actor):
+    def confirm(self, ident, approve, actor, source=None):
         ident = text(ident, 'کد درخواست', limit=32)
         row = self.db.one('SELECT * FROM pending WHERE id=?', (ident,))
         if not row or row['status'] != 'pending':
@@ -2022,6 +2102,8 @@ class Bot:
         elif approve:
             raise UserError('ابتدا تطبیق بازیکن را با /link مشخص کنید.')
         self.db.execute('UPDATE pending SET status=? WHERE id=?', ('approved' if approve else 'rejected', ident))
+        # SPEC-056: the card that was answered stops looking open.
+        self.close_card(row, approve, source)
         self.notify_requester(row, payload, approve)
         if row['kind'] == 'binding':
             self.db.say(row['chat_id'], 'اتصال حساب تأیید شد ✅')
@@ -2257,8 +2339,12 @@ class Bot:
         return (f'رسید #{receipt_id} برای تأیید ادمین ارسال شد؛ هنوز از بدهی کم نشده.' if pending else
                 f'رسید #{receipt_id} در حالت اعتماد ثبت شد.\n' + self.service.debt(player['id']))
 
-    def review(self, receipt_id, approve, actor):
+    def review(self, receipt_id, approve, actor, source=None):
         row = self.service.review_receipt(receipt_id, approve, actor)
+        # SPEC-056: a receipt card is a card too; it stops looking open.
+        source = source if isinstance(source, dict) else {}
+        self.retire_card(source.get('chat_id'), source.get('message_id'),
+                         CARD_APPROVED if approve else CARD_REJECTED, source.get('text'))
         self.db.say(row['chat_id'], f'رسید #{receipt_id} ' + ('تأیید شد.\n' + self.service.debt(row['player_id']) if approve
                     else 'تأیید نشد؛ مبلغ از بدهی کم نشد. برای توضیح یا اصلاح با ادمین تماس بگیرید.'))
         return f'رسید #{receipt_id} ' + ('تأیید شد ✅' if approve else 'رد شد.')
@@ -2269,11 +2355,13 @@ class Bot:
         if not self.is_admin(chat_id, user_id):
             self.db.queue('answerCallbackQuery', {'callback_query_id': callback['id'], 'text': 'فقط ادمین مجاز در گروه مدیریتی.'})
             return
+        # SPEC-056: the pressed message is the card to close.
+        source = self.card_source(callback)
         report = ''
         try:
             kind, ident = callback.get('data', '').split(':', 1)
             if kind in ('yes', 'no'):
-                result = self.confirm(ident, kind == 'yes', user_id)
+                result = self.confirm(ident, kind == 'yes', user_id, source)
                 # SPEC-050: read back what the approved proposal changed, so the
                 # confirmation carries the resulting state and not only "done".
                 if kind == 'yes':
@@ -2282,8 +2370,12 @@ class Bot:
                 # SPEC-052: the claim card itself creates the player it names,
                 # so a brand-new name is one click away from a linkable card.
                 result = self.claim_create(ident, user_id)
+                # SPEC-056: this card's button did its job; the new identity
+                # card is a fresh one.
+                self.retire_card(source.get('chat_id'), source.get('message_id'),
+                                 CARD_CREATED, source.get('text'))
             elif kind in ('pay', 'reject'):
-                result = self.review(integer(ident, 'شناسهٔ رسید', 1), kind == 'pay', user_id)
+                result = self.review(integer(ident, 'شناسهٔ رسید', 1), kind == 'pay', user_id, source)
                 if kind == 'pay':
                     report = self.receipt_report(ident)
             else:

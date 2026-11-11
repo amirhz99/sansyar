@@ -88,11 +88,21 @@ class BaseCase(unittest.TestCase):
         self.bot.process(update)
         return update
 
-    def click(self, data, user=1, chat=-100):
+    def click(self, data, user=1, chat=-100, message_id=None, text=None):
+        """Press one inline button.
+
+        SPEC-056: a real callback carries the message it was pressed on, so a
+        test that is about the card passes its id and text too.
+        """
         self.update_id += 1
+        message = {'chat': {'id': chat}}
+        if message_id is not None:
+            message['message_id'] = message_id
+        if text is not None:
+            message['text'] = text
         self.bot.process({'update_id': self.update_id, 'callback_query': {
             'id': f'cb{self.update_id}', 'data': data, 'from': {'id': user},
-            'message': {'chat': {'id': chat}}}})
+            'message': message}})
 
     def replies(self, chat=None):
         payloads = [json.loads(r['payload']) for r in self.db.all("SELECT payload FROM outbox WHERE method='sendMessage' ORDER BY id")]
