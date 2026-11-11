@@ -83,6 +83,7 @@ never carries two copies of the same card.
 - [x] AC-001: a card for two or more `adjustment`/`settle` commands contains exactly one `| بازیکن |` header and no repeated action heading.
 - [x] AC-002: a one-player card is unchanged: it still starts with `Service.preview` and contains no table.
 - [x] AC-003: a batch card keeps «کد: <id>» and «تمام مبلغ‌ها تومان هستند».
+  (SPEC-057 removed the currency note; the code line stays.)
 - [x] AC-004: a batch card shows a total row equal to the sum of its rows.
 - [x] AC-005: a `settle` row shows `-balance`, and approving the card still brings every listed balance to zero.
 - [x] AC-006: a mixed batch keeps the classic per-command previews.
@@ -95,7 +96,7 @@ never carries two copies of the same card.
 
 - AC-001 -> `tests/test_sans.py::BatchCardLayoutTests::test_batch_card_is_one_table_not_one_block_per_player`
 - AC-002 -> `tests/test_sans.py::BatchCardLayoutTests::test_single_card_is_unchanged`
-- AC-003 -> `tests/test_sans.py::BatchCardLayoutTests::test_batch_card_keeps_the_code_and_the_currency_note`
+- AC-003 -> `tests/test_sans.py::BatchCardLayoutTests::test_batch_card_keeps_the_code_and_drops_the_currency_note`
 - AC-004 -> `tests/test_sans.py::BatchCardLayoutTests::test_batch_card_totals_the_amounts`
 - AC-005 -> `tests/test_sans.py::BatchCardLayoutTests::test_settle_row_shows_the_balance_the_approval_will_apply`
 - AC-006 -> `tests/test_sans.py::BatchCardLayoutTests::test_mixed_batch_keeps_the_classic_previews`

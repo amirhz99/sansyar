@@ -2494,7 +2494,8 @@ class AudienceOutreachTests(BaseCase):
         self.assertIn('گیرندگان (3 نفر)', preview)
         self.assertIn('غیربازیکن (1 نفر', preview)
         self.assertIn('مهمان', preview)
-        self.assertIn('پیام فقط پس از تأیید شما ارسال می‌شود.', preview)
+        # SPEC-057: the card *is* the approval, so it no longer repeats it.
+        self.assertNotIn('پیام فقط پس از تأیید شما ارسال می‌شود.', preview)
 
     def test_preview_reports_an_unconfirmed_audience(self):
         command = self.service.prepare('broadcast', {'text': 'سلام', 'players': None})
@@ -4741,11 +4742,12 @@ class BatchCardLayoutTests(BaseCase):
         self.assertIn('تسویه کامل حساب', text)
         self.assertNotIn('| بازیکن |', text)
 
-    def test_batch_card_keeps_the_code_and_the_currency_note(self):
+    def test_batch_card_keeps_the_code_and_drops_the_currency_note(self):
         text, markup = self.card(*self.adjustments((self.ids[0], -1000), (self.ids[1], -2000)))
         ident = markup[0][0]['callback_data'].split(':', 1)[1]
         self.assertIn(f'کد: {ident}', text)
-        self.assertIn('تمام مبلغ‌ها تومان هستند', text)
+        # SPEC-057: every amount is already toman; the note was noise on every card.
+        self.assertNotIn('تمام مبلغ‌ها تومان هستند', text)
 
     def test_settle_row_shows_the_balance_the_approval_will_apply(self):
         self.apply('adjustment', player=self.ids[0], amount=400000, note='بدهی قبلی')

@@ -696,7 +696,7 @@ class Bot:
                     for key, value in changes.items()]
         ident = self.new_pending('commands', commands, user_id, chat_id)
         preview = '\n\n'.join(self.service.preview(c) for c in commands)
-        return (preview + f'\n\nاین تغییر با تأیید شما اعمال می‌شود. کد: {ident}',
+        return (preview + f'\n\nکد: {ident}',
                 buttons('yes:' + ident, 'no:' + ident))
 
     # SPEC-030: a multi-player card used to be eight raw ``Service.preview``
@@ -760,9 +760,9 @@ class Bot:
         preview = self.batch_table(commands)
         if preview is None:
             preview = '\n\n'.join(self.service.preview(c) for c in commands)
-        tail = f'\n\nثبت شود؟ کد: {ident}'
-        if any(c['action'] != 'broadcast' for c in commands):
-            tail += '\nتمام مبلغ‌ها تومان هستند.'
+        # SPEC-057: the buttons ask the question; the card only carries its code,
+        # which is how a card is referenced later.
+        tail = f'\n\nکد: {ident}'
         # SPEC-017: a default is never applied silently; name it and ask.
         used = sorted({key for command in commands
                        for key in (command['args'].get('defaults_used') or [])})
@@ -2297,7 +2297,7 @@ class Bot:
                     # never re-sent and its buttons can be removed on expiry.
                     self.card_ref(buttons('yes:' + ident, 'no:' + ident)))
         return (self.service.preview(command) +
-                f'\n\nاین اعلام برای تأیید ادمین ارسال شد. کد: {ident}',
+                f'\n\nبرای تأیید ادمین ارسال شد. کد: {ident}',
                 None)
 
     def expired_receipt(self, state):

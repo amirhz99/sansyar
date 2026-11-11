@@ -157,6 +157,9 @@ AGENT_SYSTEM_PROMPT = """تو «{bot_name}» هستی؛ دستیار هوشمن�
 
 ۳. لحن و سبک پاسخ:
    - طبیعی، محترمانه، خودمانی و مختصر صحبت کن.
+   - کوتاه بنویس: هر جواب گفت‌وگویی حداکثر دو خط. اگر ابزاری کارت ساخت، کارت خودش زیر جواب ضمیمه می‌شود؛ متنش را بازگو نکن و فقط در یک خط بگو چه کارتی آماده است و منتظر تأیید بمان.
+   - فهرست، جدول یا ریز اعداد را فقط وقتی بده که کاربر خودش خواسته باشد («فهرست»، «چه کسانی»، «چند نفر»، «ریز»)؛ وگرنه یک عدد و یک جمله کافی است.
+   - جمع‌بندی پایانی، تعارف تکراری و پیشنهادهای اضافه («می‌خوای … هم بفرستم؟») را ننویس؛ اگر پیشنهاد واقعاً لازم است، در یک نیم‌خط بنویس.
    - فقط و فقط متن طبیعی فارسی بنویس؛ هرگز خروجی JSON یا ساختار کد نده.
    - همه مبالغ به تومان است (مگر کاربر صراحتاً ریال بگوید که به تومان تبدیل می‌کنی).
    - هزینه زمین (`venue_cost`) در بدهی بازیکنان وارد نمی‌شود و بدهی هر نفر در سانس نهایی‌شده برابر است با `سهم هر نفر × (۱ + تعداد مهمان)`.
@@ -171,6 +174,13 @@ AGENT_SYSTEM_PROMPT = """تو «{bot_name}» هستی؛ دستیار هوشمن�
    - اگر درخواست دربارهٔ موضوعی نامرتبط است، آن را انجام نده و دربارهٔ آن توضیح یا پاسخ عمومی ارائه نکن؛ هیچ ابزاری را اجرا نکن.
    - در پاسخ به موضوع نامرتبط، کوتاه و روشن بگو: «این درخواست نامرتبط است؛ من فقط مسئول مدیریت سانس فوتبال هستم و نمی‌توانم به آن پاسخ بدهم.»
 """
+
+
+# SPEC-057: a tool that attaches a card hands the model the instruction, not the
+# card body.  The model mirrors whatever it receives, so a result carrying the
+# whole card made the answer and the card say the same thing twice.
+CARD_READY = ('کارت تأیید ساخته شد و خودکار زیر همین جواب ضمیمه می‌شود؛ متن کارت را '
+              'در جواب بازگو نکن و فقط در یک خط بگو چه چیزی آماده شد و چه تصمیمی لازم است.')
 
 
 def _unwrap_accidental_json(reply: str) -> str:
@@ -675,7 +685,7 @@ class SansAgent:
                     preview, markup = bot.propose_settings(changes, user_id, chat_id)
                     effects['markup'] = markup
                     effects['proposal_preview'] = preview
-                    return f'پیشنهاد تغییر تنظیمات آماده شد و دکمه‌های تأیید/رد ضمیمه گردید:\n{preview}'
+                    return CARD_READY
 
                 if operation == 'rename_player':
                     unknown = set(data) - {'player', 'name'}
@@ -696,7 +706,7 @@ class SansAgent:
                     preview, markup = bot.propose(cmd, user_id, chat_id)
                     effects['markup'] = markup
                     effects['proposal_preview'] = preview
-                    return f'پیشنهاد ادغام آماده شد و دکمه‌های تأیید/رد ضمیمه گردید:\n{preview}'
+                    return CARD_READY
 
                 if operation == 'delete_player':
                     unknown = set(data) - {'player'}
@@ -706,7 +716,7 @@ class SansAgent:
                     preview, markup = bot.propose(cmd, user_id, chat_id)
                     effects['markup'] = markup
                     effects['proposal_preview'] = preview
-                    return f'پیشنهاد حذف بازیکن آماده شد و دکمه‌های تأیید/رد ضمیمه گردید:\n{preview}'
+                    return CARD_READY
 
                 if operation == 'duplicates':
                     return service.duplicates_report()
@@ -730,7 +740,7 @@ class SansAgent:
                         text, markup = bot.propose_commands(commands, user_id, chat_id)
                         effects['markup'] = markup
                         effects['proposal_preview'] = text
-                        return preview + '\nیک کارت تأیید برای این زوج‌ها ساخته شد؛ بدون تأیید شما پیوندی ساخته نمی‌شود.'
+                        return preview + '\nکارت تأیید این زوج‌ها ضمیمه شد؛ بدون تأیید شما پیوندی ساخته نمی‌شود.'
                     if operation == 'links':
                         rows = db.all('SELECT * FROM player_links ORDER BY low_id, high_id')
                         if not rows:
@@ -826,8 +836,8 @@ class SansAgent:
             preview, markup = bot.propose_commands(commands, user_id, chat_id)
             effects['markup'] = markup
             effects['proposal_preview'] = preview
-            reply = (f'پیشنهاد برای {len(commands)} نفر آماده شد و دکمه‌های تأیید/رد ضمیمه گردید:'
-                     f'\n{preview}')
+            reply = (f'کارت تأیید برای {len(commands)} نفر ساخته شد و خودکار زیر جواب '
+                     f'ضمیمه می‌شود؛ متن کارت را بازگو نکن.')
             if skipped:
                 reply += '\nبدون بدهی و خارج از کارت: ' + '، '.join(skipped)
             return reply
@@ -965,7 +975,7 @@ class SansAgent:
                 preview, markup = bot.propose(cmd, user_id, chat_id)
                 effects['markup'] = markup
                 effects['proposal_preview'] = preview
-                return f'پیشنهاد مالی آماده شد و دکمه‌های تأیید/رد ضمیمه گردید:\n{preview}'
+                return CARD_READY
             except UserError as exc:
                 return str(exc)
             except Exception as exc:
@@ -996,7 +1006,7 @@ class SansAgent:
                 return str(exc)
             effects['markup'] = markup
             effects['proposal_preview'] = preview
-            return f'پیشنهاد ارسال پیام آماده شد و دکمه‌های تأیید/رد ضمیمه گردید:\n{preview}'
+            return CARD_READY
 
         @tool
         def ask_admins(question: str) -> str:

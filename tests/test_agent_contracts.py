@@ -881,7 +881,9 @@ class AgentContractTests(unittest.TestCase):
             -100, 1, True, {'first_name': 'ادمین'}, effects)}
         result = tools['manage_records'].invoke({'operation': 'merge_player', 'data_json': json.dumps(
             {'source': '#2', 'target': '#1'}, ensure_ascii=False)})
-        self.assertIn('پیشنهاد ادغام', result)
+        self.assertIn('ادغام بازیکن', effects['proposal_preview'])
+        # SPEC-057: the tool result is an instruction now, not the card body.
+        self.assertNotIn('ادغام بازیکن', result)
         self.assertTrue(effects.get('markup'))
         self.assertIsNotNone(self.db.one('SELECT 1 FROM players WHERE id=2'))
 
@@ -1060,7 +1062,6 @@ class AgentReplyPreviewTests(unittest.TestCase):
         self.assertEqual(final, reply)
         self.assertEqual(final.count('| بازیکن |'), 1)
         # The doubling came from a second copy of the whole card body.
-        self.assertEqual(final.count('ثبت شود؟ کد:'), 1)
         self.assertEqual(final.count('| **جمع** |'), 1)
 
     def test_reply_with_the_code_word_but_no_card_still_gets_the_card(self):
@@ -1495,26 +1496,30 @@ class OutreachPromptTests(unittest.TestCase):
         self.assertIn('request_phone=true', AGENT_SYSTEM_PROMPT)
 
     def test_message_players_exposes_both_audiences(self):
-        tools, _ = self.tools(admin=True)
+        tools, effects = self.tools(admin=True)
         self.assertIn('audience', tools['message_players'].args)
         self.assertIn('request_phone', tools['message_players'].args)
 
         reply = tools['message_players'].invoke({'text': 'سانس فردا لغو شد', 'audience': 'all'})
 
-        self.assertIn('حالت: همهٔ مخاطبان ربات', reply)
-        self.assertIn('گیرندگان (3 نفر)', reply)
-        self.assertIn('مهمان', reply)
-        self.assertIn('تأیید', reply)
+        card = effects['proposal_preview']
+        self.assertIn('حالت: همهٔ مخاطبان ربات', card)
+        self.assertIn('گیرندگان (3 نفر)', card)
+        self.assertIn('مهمان', card)
+        # SPEC-057: the card is the approval, and the tool result only points at it.
+        self.assertIn('yes:', json.dumps(effects['markup'], ensure_ascii=False))
+        self.assertNotIn('حالت: همهٔ مخاطبان ربات', reply)
         # A proposal only: nothing is delivered or recorded before the click.
         self.assertEqual(self.db.one('SELECT COUNT(*) n FROM outreach')['n'], 0)
 
     def test_request_phone_is_reported_on_the_card(self):
-        tools, _ = self.tools(admin=True)
+        tools, effects = self.tools(admin=True)
 
-        reply = tools['message_players'].invoke({'text': 'شماره‌تان را بفرستید',
-                                                 'audience': 'all', 'request_phone': True})
+        tools['message_players'].invoke({'text': 'شماره‌تان را بفرستید',
+                                         'audience': 'all', 'request_phone': True})
 
-        self.assertIn('دکمهٔ «ارسال شمارهٔ من» هم فرستاده می‌شود', reply)
+        # SPEC-057: the fact lives on the card, which is what the admin reads.
+        self.assertIn('دکمهٔ «ارسال شمارهٔ من» هم فرستاده می‌شود', effects['proposal_preview'])
 
 
 class OnboardingAgentContextTests(unittest.TestCase):

@@ -1760,6 +1760,17 @@ class Service:
                      'نیست. سانس بعدی از این سانس بدهی به ارث نمی‌برد.')
         return '\n'.join(lines)
 
+    # SPEC-057: an admin never verifies a long name list on a card; the count is
+    # the fact and the detail is one `query_database` call away.
+    BROADCAST_NAME_LIMIT = 5
+
+    @classmethod
+    def capped_names(cls, names):
+        """Return at most ``BROADCAST_NAME_LIMIT`` names plus a remainder count."""
+        shown = '، '.join(names[:cls.BROADCAST_NAME_LIMIT])
+        extra = len(names) - cls.BROADCAST_NAME_LIMIT
+        return f'{shown} و {extra} نفر دیگر' if extra > 0 else shown
+
     def preview(self, command):
         action, a = command['action'], command['args']
         if action == 'settings':
@@ -1786,25 +1797,21 @@ class Service:
                               'این بازیکن هیچ حضور، تراکنش یا رسیدی ندارد.'])
         if action == 'broadcast':
             recipients, unreachable = self.broadcast_recipients(a['players'], a['audience'])
-            names = '، '.join(r['name'] for r in recipients[:10])
-            if len(recipients) > 10:
-                names += f' و {len(recipients) - 10} نفر دیگر'
             lines = ['ارسال پیام', f"حالت: {AUDIENCE_LABELS[a['audience']]}", a['text'], '',
-                     f'گیرندگان ({len(recipients)} نفر): {names}']
+                     f'گیرندگان ({len(recipients)} نفر): {self.capped_names([r["name"] for r in recipients])}']
             unconfirmed = [r['name'] for r in recipients if r['source'] == 'identity']
             if unconfirmed:
                 lines.append(f'بدون بازیکن تأییدشده ({len(unconfirmed)} نفر، بر اساس درخواست شناسایی باز): ' +
-                             '، '.join(unconfirmed[:10]))
+                             self.capped_names(unconfirmed))
             outsiders = [r['name'] for r in recipients if r['source'] == 'contact']
             if outsiders:
                 lines.append(f'غیربازیکن ({len(outsiders)} نفر، فقط ربات را استارت کرده‌اند): ' +
-                             '، '.join(outsiders[:10]))
+                             self.capped_names(outsiders))
             if a['request_phone']:
                 lines.append('همراه پیام، دکمهٔ «ارسال شمارهٔ من» هم فرستاده می‌شود.')
             if unreachable:
                 lines.append(f'بدون آدرس قابل‌دسترس و بدون دریافت پیام ({len(unreachable)} نفر): ' +
-                             '، '.join(unreachable[:10]))
-            lines.append('پیام فقط پس از تأیید شما ارسال می‌شود.')
+                             self.capped_names(unreachable))
             return '\n'.join(lines)
         labels = {'new_player': 'ثبت بازیکن', 'new_session': 'ثبت سانس', 'update_session': 'تکمیل سانس',
                   'attendance': 'ثبت/اصلاح حضور', 'finalize': 'نهایی‌سازی بدهی سانس',
@@ -1844,19 +1851,38 @@ class Service:
             lines.append('از پیش‌فرض آمد: ' + '، '.join(fields.get(key, key) for key in used))
         if action == 'finalize':
             s = self.session(a['session'])
-            total = 0
-            for row in self.db.all('''SELECT a.*,p.name FROM attendance a JOIN players p ON p.id=a.player_id
-                                      WHERE session_id=? ORDER BY p.id''', (s['id'],)):
-                amount = (row['own'] + row['guests']) * s['person_fee']
-                total += amount
-                if row['own']:
-                    lines.append(f"{row['name']}: {row['guests']} مهمان، {amount:,} تومان")
-                else:
-                    lines.append(f"{row['name']}: خودش حاضر نبود، {row['guests']} مهمان، {amount:,} تومان")
+            rows = self.db.all('''SELECT a.*,p.name FROM attendance a JOIN players p ON p.id=a.player_id
+                                  WHERE session_id=? ORDER BY p.id''', (s['id'],))
+            total = sum((row['own'] + row['guests']) * s['person_fee'] for row in rows)
+            # SPEC-057: one line per fact instead of one line per player.  Every
+            # name stays — the names are what the admin approves — but the fee is
+            # stated once, in the total line, not repeated on every row.
+            lines.append(f'جمع بدهی جدید: {total:,} تومان برای {len(rows)} نفر '
+                         f'(سهم پایه {s["person_fee"]:,} تومان)')
+            present = []
+            for row in rows:
+                if not row['own']:
+                    continue
+                if not row['guests']:
+                    present.append(row['name'])
+                    continue
                 names = self.guest_names(s['id'], row['player_id'])
-                if names:
-                    lines.append('  مهمان‌ها: ' + '، '.join(names))
-            lines.append(f'جمع بدهی جدید: {total:,} تومان؛ هزینهٔ زمین در محاسبه دخالت ندارد.')
+                guest_note = f"{row['guests']} مهمان" + (f": {'، '.join(names)}" if names else '')
+                present.append(f"{row['name']} ({guest_note})")
+            if present:
+                lines.append('حاضر: ' + '، '.join(present))
+            guests_only = []
+            for row in rows:
+                if row['own']:
+                    continue
+                names = self.guest_names(s['id'], row['player_id'])
+                guest_note = f"{row['guests']} مهمان" + (f": {'، '.join(names)}" if names else '')
+                guests_only.append(f"{row['name']} ({guest_note})")
+            if guests_only:
+                lines.append('فقط مهمان (خودش حاضر نبود): ' + '، '.join(guests_only))
+            if s['venue_cost']:
+                # SPEC-057: the venue sentence is only news when there is a venue.
+                lines.append(f'هزینهٔ زمین {s["venue_cost"]:,} تومان جداست و در بدهی نیامده.')
         return '\n'.join(lines)
 
     def apply(self, command, actor, source):
