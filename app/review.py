@@ -121,7 +121,7 @@ def _turns(rows):
 
 def _enrich(turn):
     """Attach the facts every detector needs to one turn."""
-    tools, results, answer, duration, tool_calls = [], [], '', 0, []
+    tools, results, answer, duration, tool_calls, card = [], [], '', 0, [], ''
     for row in turn['events']:
         if row['event'] == 'LLM_TOOL_CALL':
             tools.extend(part.strip() for part in (row['summary'] or '').split(',') if part.strip())
@@ -135,11 +135,14 @@ def _enrich(turn):
             answer = row['summary'] or ''
             duration = int(row['duration_ms'] or 0)
             try:
-                tool_calls = json.loads(row['details'] or '{}').get('tool_calls') or []
+                details = json.loads(row['details'] or '{}')
             except ValueError:
-                tool_calls = []
+                details = {}
+            tool_calls = details.get('tool_calls') or []
+            # SPEC-058: the card the code attached to this answer, if any.
+            card = str(details.get('card') or '')
     turn.update({'tools': tools, 'results': ' '.join(results), 'answer': answer,
-                 'duration': duration, 'tool_calls': tool_calls})
+                 'duration': duration, 'tool_calls': tool_calls, 'card': card})
     return turn
 
 
@@ -410,11 +413,15 @@ def _unverified_numbers(turns):
             continue                      # the stored tool result is cut
         if '×' in turn['answer'] or '=' in turn['answer']:
             continue                      # the answer shows its own arithmetic
-        unknown = (_amounts(turn['answer']) - _amounts(turn['results'])
-                   - _amounts(turn['input']))
+        # SPEC-058: the attached card is written by `Service.preview` from the
+        # database, so its amounts are evidence — the model cannot author it.
+        trusted = turn['results'] + ' ' + (turn.get('card') or '')
+        unknown = (_amounts(turn['answer']) - _amounts(trusted) - _amounts(turn['input']))
         if unknown:
-            hits.append(_sample(turn, f"پاسخ: {sorted(unknown)} | ابزار: "
-                                       f"{sorted(_amounts(turn['results']))[:4]}"))
+            evidence = f"پاسخ: {sorted(unknown)} | ابزار: {sorted(_amounts(turn['results']))[:4]}"
+            if turn.get('card'):
+                evidence += f" | کارت: {sorted(_amounts(turn['card']))[:4]}"
+            hits.append(_sample(turn, evidence))
     return [{'key': 'unverified_number',
              'title': 'مبلغی در پاسخ که در نتیجهٔ ابزار نبود (نیازمند بررسی)',
              'priority': 'بالا',
@@ -422,9 +429,9 @@ def _unverified_numbers(turns):
              'samples': hits[:4],
              'impact': 'ممکن است کاربر مبلغ غلط ببیند؛ خطرناک‌ترین نوع خطا در این ربات.',
              'plan': 'هر مورد را با `chat_messages` همان چت مقایسه کنید؛ اگر عدد ساختگی '
-                     'بود، در پایان نوبت عددهای پاسخ با `TOOL_RESULT` سنجیده شود و در '
-                     'صورت نبود، جملهٔ محتاطانه جایگزین شود. تست: پاسخ با مبلغی که ابزار '
-                     'برنگردانده.'}]
+                     'بود، در پایان نوبت عددهای پاسخ با `TOOL_RESULT` و متن کارت سنجیده '
+                     'شود و در صورت نبود، جملهٔ محتاطانه جایگزین شود. تست: پاسخ با مبلغی '
+                     'که ابزار و کارت برنگردانده‌اند.'}]
 
 
 def _missing_read(turns):

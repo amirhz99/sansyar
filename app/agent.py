@@ -1340,6 +1340,9 @@ class SansAgent:
                 'admin': admin,
                 'tool_calls': effects['tool_calls'],
                 'has_markup': bool(effects.get('markup')),
+                # SPEC-058: the card is code output, not a model claim, so the
+                # self-review must see it as evidence when it checks amounts.
+                'card': (effects.get('proposal_preview') or '')[:800],
             },
             duration_ms=total_ms,
         )
