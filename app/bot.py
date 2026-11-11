@@ -206,6 +206,8 @@ def buttons(yes, no):
 CARD_APPROVED = '✅ تأیید شد'
 CARD_REJECTED = '❌ رد شد'
 CARD_CREATED = '✅ بازیکن ساخته شد'
+# SPEC-059: a second card for a pair that is already linked.
+CARD_ALREADY_LINKED = '✅ از قبل وصل بودند'
 # The provider refuses a text longer than this; a card that would grow past it
 # only loses its keyboard.
 CARD_TEXT_LIMIT = 4096
@@ -215,6 +217,7 @@ class Bot:
     def __init__(self, db, config, ai):
         self.db, self.config, self.ai = db, config, ai
         self.service = Service(db)
+        self.link_was_duplicate = False      # SPEC-059
         self.context_builder = AIContextBuilder(db, self.service)
         self.session_view = SessionView(self.service)
         self.system_prompt = SYSTEM_PROMPT
@@ -899,9 +902,9 @@ class Bot:
             chat_id = self.config.admin_group
         return chat_id, message_id
 
-    def close_card(self, row, approve, source=None):
+    def close_card(self, row, approve, source=None, status=None):
         """Stamp and close the proposal card a decision answered (SPEC-056)."""
-        status = CARD_APPROVED if approve else CARD_REJECTED
+        status = status or (CARD_APPROVED if approve else CARD_REJECTED)
         source = source if isinstance(source, dict) else {}
         chat_id, message_id = source.get('chat_id'), source.get('message_id')
         text = source.get('text')
@@ -2073,15 +2076,66 @@ class Bot:
             raise UserError('از زمان ساخت این کارت، مانده یا اطلاعات مرتبط تغییر کرده است؛ '
                             'برای دیدن وضعیت تازه دوباره درخواست بدهید.')
 
+    def duplicate_link(self, payload):
+        """SPEC-059: return the pair of a link card that is already linked."""
+        if not isinstance(payload, list) or len(payload) != 1:
+            return None
+        command = payload[0]
+        if not isinstance(command, dict) or command.get('action') != 'player_link':
+            return None
+        args = command.get('args') if isinstance(command.get('args'), dict) else {}
+        try:
+            left = self.service.player(args.get('player'))
+            right = self.service.player(args.get('partner'))
+        except UserError:
+            return None
+        if not self.service.are_linked(left['id'], right['id']):
+            return None
+        return {'left': left['id'], 'left_name': left['name'],
+                'right': right['id'], 'right_name': right['name']}
+
+    # SPEC-059: both players hear about a link, not only the admin.
+    LINK_NOTICE = ('حساب شما به «{partner}» وصل شد. از این به بعد ماندهٔ هم را می‌بینید و '
+                   'هر کدام می‌توانید برای دیگری درخواست تسویه بدهید؛ هیچ پولی خودکار '
+                   'جابه‌جا نمی‌شود. اگر این پیوند را نمی‌خواهید به ادمین بگویید.')
+
+    def announce_link(self, command):
+        """Send one short message to each player who now has a partner."""
+        args = command.get('args') if isinstance(command.get('args'), dict) else {}
+        try:
+            left = self.service.player(args.get('player'))
+            right = self.service.player(args.get('partner'))
+        except UserError:
+            return []
+        told = []
+        for me, partner in ((left, right), (right, left)):
+            if not me['bale_id']:
+                continue          # a player without a Bale account cannot be told
+            self.db.say(me['bale_id'], self.LINK_NOTICE.format(partner=partner['name']))
+            told.append(me['id'])
+        return told
+
     def confirm(self, ident, approve, actor, source=None):
         ident = text(ident, 'کد درخواست', limit=32)
         row = self.db.one('SELECT * FROM pending WHERE id=?', (ident,))
         if not row or row['status'] != 'pending':
             raise UserError('این درخواست موجود نیست یا قبلاً بررسی/لغو شده است.')
         payload = json.loads(row['payload'])
+        self.link_was_duplicate = False
         settings_change = (row['kind'] == 'commands' and isinstance(payload, list)
                            and any(isinstance(c, dict) and c.get('action') == 'settings' for c in payload))
         if approve and row['kind'] == 'commands':
+            # SPEC-059: a second card for a pair that is already linked is not a
+            # stale proposal — the state the admin wanted holds, so say so and
+            # close the card instead of failing the fingerprint check.
+            duplicate = self.duplicate_link(payload)
+            if duplicate:
+                self.link_was_duplicate = True
+                self.db.execute('UPDATE pending SET status=? WHERE id=?', ('approved', ident))
+                self.close_card(row, approve, source, CARD_ALREADY_LINKED)
+                return (f"این دو حساب از قبل به هم وصل بودند "
+                        f"(#{duplicate['left']} {duplicate['left_name']} ↔ "
+                        f"#{duplicate['right']} {duplicate['right_name']})؛ کارت تکراری بسته شد.")
             self.assert_proposal_current(row, payload)
             self.db.execute('SAVEPOINT apply_commands')
             try:
@@ -2102,6 +2156,10 @@ class Bot:
         elif approve:
             raise UserError('ابتدا تطبیق بازیکن را با /link مشخص کنید.')
         self.db.execute('UPDATE pending SET status=? WHERE id=?', ('approved' if approve else 'rejected', ident))
+        if approve and row['kind'] == 'commands':
+            for command in payload:
+                if isinstance(command, dict) and command.get('action') == 'player_link':
+                    self.announce_link(command)
         # SPEC-056: the card that was answered stops looking open.
         self.close_card(row, approve, source)
         self.notify_requester(row, payload, approve)
@@ -2206,8 +2264,10 @@ class Bot:
             raise UserError('یک حساب را نمی‌توان به خودش وصل کرد.')
         if self.service.are_linked(player['id'], partner['id']):
             raise UserError(f"حساب شما از قبل به «{partner['name']}» وصل است.")
-        for row in self.db.all("SELECT payload FROM pending WHERE requester=? AND kind='commands' "
-                               "AND status='pending'", (user_id,)):
+        # SPEC-059: one pair, one pending card.  The check used to be scoped to
+        # the requester, so both sides of the same pair could file at once.
+        for row in self.db.all("SELECT payload FROM pending WHERE kind='commands' "
+                               "AND status='pending'"):
             try:
                 commands = json.loads(row['payload'])
             except (TypeError, ValueError):
@@ -2217,7 +2277,7 @@ class Bot:
                         and sorted([(command.get('args') or {}).get('player'),
                                     (command.get('args') or {}).get('partner')])
                         == sorted([player['id'], partner['id']])):
-                    raise UserError('درخواست پیوند شما با این حساب هنوز منتظر بررسی ادمین است.')
+                    raise UserError('درخواست پیوند این دو حساب از قبل ثبت شده و منتظر بررسی ادمین است.')
         command = self.service.prepare('player_link', {'player': player['id'],
                                                        'partner': partner['id']})
         ident = self.new_pending('commands', [command], user_id, chat_id)
@@ -2364,7 +2424,7 @@ class Bot:
                 result = self.confirm(ident, kind == 'yes', user_id, source)
                 # SPEC-050: read back what the approved proposal changed, so the
                 # confirmation carries the resulting state and not only "done".
-                if kind == 'yes':
+                if kind == 'yes' and not self.link_was_duplicate:
                     report = self.applied_report(ident)
             elif kind == 'mk':
                 # SPEC-052: the claim card itself creates the player it names,
