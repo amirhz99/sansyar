@@ -1453,13 +1453,18 @@ class Bot:
             return {'action': 'link', 'args': {'id': pieces[0], 'player': pieces[1]}}
         if name == 'bind' and admin:
             if not rest:
-                raise UserError('/bind شناسه یا نام بازیکن [@username] و ریپلای به پروفایل')
+                raise UserError('/bind شناسه یا نام بازیکن [@username | شناسهٔ بله | شماره] — '
+                                'یا ریپلای به پروفایل کاربر')
             pieces = rest.rsplit(maxsplit=1)
             if len(pieces) == 2 and pieces[1].startswith('@'):
                 player, username = pieces
                 if not player.strip():
                     raise UserError('/bind شناسه یا نام بازیکن [@username] و ریپلای به پروفایل')
                 return {'action': 'bind', 'args': {'player': player, 'username': username}}
+            if len(pieces) == 2 and self.account_ref(pieces[1]):
+                # SPEC-060: a Bale id or phone the bot already knows names the
+                # account directly; no replied profile message is required.
+                return {'action': 'bind', 'args': {'player': pieces[0], 'user': pieces[1].strip()}}
             return {'action': 'bind', 'args': {'player': rest}}
         if name in ('merge', 'rename', 'delplayer', 'newplayer', 'duplicates') and admin:
             if name == 'duplicates':
@@ -1527,8 +1532,17 @@ class Bot:
         """Rename directly: it is reversible and keeps the id and history."""
         player = self.service.player(player_ref)
         result = self.service.rename_player(player['id'], new_name, actor)
-        return (f"نام #{result['id']} از «{result['old']}» به «{result['new']}» تغییر کرد؛ "
-                'شناسه و کل تاریخچه حفظ شد.')
+        # SPEC-060: the rename is usually the step that makes an open claim
+        # match — the admin recognises a returning player who signed up under a
+        # short name.  Attaching here turns that claim into an approvable card
+        # at that moment instead of leaving a buttonless request on file.
+        attached = self.attach_claims(self.service.player(result['id']), actor)
+        reply = (f"نام #{result['id']} از «{result['old']}» به «{result['new']}» تغییر کرد؛ "
+                 'شناسه و کل تاریخچه حفظ شد.')
+        if attached:
+            reply += ('\nکارت شناسایی درخواست باز همین حالا با دکمهٔ تأیید برای اتصال حساب '
+                      'فرستاده شد؛ برای وصل کردن همان دکمه را بزنید.')
+        return reply
 
     def identify(self, name, user_id, chat_id, sender=None, phone_number=None):
         if self.service.linked(user_id):
@@ -1870,7 +1884,12 @@ class Bot:
         reply = message.get('reply_to_message') if isinstance(message, dict) else None
         profile = self.extract_profile_user(reply)
         if not profile:
-            raise UserError('برای /bind باید به پیام پروفایل کاربر ریپلای کنید؛ شناسهٔ عددی معتبر و غیررباتی لازم است.')
+            if args.get('user') is not None:
+                # SPEC-060: the account is named directly, so no replied profile
+                # message is needed — but only an account the bot has seen.
+                return self.bind_known(args.get('player'), args.get('user'), actor, chat_id)
+            raise UserError('برای /bind باید به پیام پروفایل کاربر ریپلای کنید؛ شناسهٔ عددی معتبر و غیررباتی لازم است. '
+                            'یا شناسهٔ بله / شمارهٔ حسابی که قبلاً با ربات کار کرده را بعد از نام بازیکن بنویسید.')
         user_id, profile_username = profile
         requested_username = args.get('username')
         if requested_username is not None:
@@ -1880,6 +1899,71 @@ class Bot:
             if not profile_username or requested_username != profile_username:
                 raise UserError('username اعلام‌شده با username پروفایل یکسان نیست.')
         player = self.service.player(args.get('player'))
+        return self._binding_card(player, user_id, profile_username or 'ارسال نشده', actor, chat_id)
+
+    def bind_known(self, player_ref, user_ref, actor, chat_id):
+        """Build the binding card for a Bale account the bot already knows.
+
+        SPEC-060: the admin could see both ends — the player row and the contact
+        the bot stored when that account opened it — and still had no way to
+        join them once the identity request was rejected: ``/bind`` demanded a
+        replied profile message, and nothing else could name an account.
+
+        Only a stored contact can be named, by Bale id or by phone.  An id that
+        never talked to the bot is refused, so a typo cannot bind a stranger,
+        and the link itself still waits for the admin's click on the card.
+        """
+        player = self.service.player(player_ref)
+        contact = self.known_contact(user_ref)
+        return self._binding_card(player, contact['user_id'],
+                                  contact['username'] or 'ارسال نشده', actor, chat_id)
+
+    @staticmethod
+    def account_ref(piece):
+        """Return a typed account reference, or ``None`` (SPEC-060).
+
+        A Bale id and a phone number are both digits, so the shape alone decides
+        whether the last word of ``/bind`` is an account or part of a two-word
+        player name.  Anything that is not digits stays a name, which keeps
+        ``/bind <نام دو کلمه‌ای>`` behaving exactly as before.
+        """
+        if not isinstance(piece, str):
+            return None
+        piece = piece.strip()
+        if not piece:
+            return None
+        digits = piece[1:] if piece.startswith('+') else piece
+        return piece if digits.isdigit() else None
+
+    def known_contact(self, user_ref):
+        """Return the stored contact an admin named, or fail closed (SPEC-060)."""
+        row = None
+        if isinstance(user_ref, bool):
+            user_ref = None
+        if isinstance(user_ref, int):
+            row = self.db.one('SELECT * FROM contacts WHERE user_id=?', (user_ref,))
+        elif isinstance(user_ref, str) and user_ref.strip():
+            piece = user_ref.strip()
+            digits = piece[1:] if piece.startswith('+') else piece
+            if digits.isdigit():
+                row = self.db.one('SELECT * FROM contacts WHERE user_id=?', (int(digits),))
+            if row is None:
+                try:
+                    phone = normalize_phone(piece)
+                except UserError:
+                    phone = None
+                if phone:
+                    matches = self.db.all('SELECT * FROM contacts WHERE phone=?', (phone,))
+                    if len(matches) > 1:
+                        raise UserError('این شماره برای چند حساب بله ثبت شده؛ شناسهٔ بله را بفرستید.')
+                    row = matches[0] if matches else None
+        if not row:
+            raise UserError('این حساب بله با ربات کار نکرده است؛ اتصال فقط برای حسابی ثبت می‌شود '
+                            'که قبلاً با ربات تعاملی داشته. شناسهٔ بله یا شمارهٔ ثبت‌شدهٔ او را بررسی کنید.')
+        return row
+
+    def _binding_card(self, player, user_id, username, actor, chat_id):
+        """Queue one binding card for an admin decision (SPEC-021, SPEC-060)."""
         if player['bale_id'] is not None or self.service.linked(user_id):
             raise UserError('این بازیکن یا حساب بله قبلاً متصل شده است؛ اتصال دوباره مجاز نیست.')
         for pending in self.db.all("SELECT payload FROM pending WHERE kind='binding' AND status='pending'"):
@@ -1891,16 +1975,17 @@ class Bot:
                 raise UserError('برای این بازیکن یا حساب بله، درخواست اتصال دیگری منتظر بررسی است.')
         ident = self.new_pending('binding', {
             'player': player['id'], 'player_name': player['name'], 'user_id': user_id,
-            'username': profile_username or 'ارسال نشده',
+            'username': username,
         }, actor, chat_id)
         note = (f'درخواست اتصال {ident}\nبازیکن: #{player["id"]} {player["name"]}\n'
-                f'شناسهٔ داخلی بله: {user_id}\nusername: @{profile_username or "ارسال نشده"}\n'
+                f'شناسهٔ داخلی بله: {user_id}\nusername: @{username}\n'
                 'آیا این حساب به این بازیکن متصل شود؟')
-        self.db.say(self.config.admin_group, note, buttons('yes:' + ident, 'no:' + ident),
+        markup = buttons('yes:' + ident, 'no:' + ident)
+        self.db.say(self.config.admin_group, note, markup,
                     # SPEC-053: remember where the card landed, so a delivered
                     # request is never re-sent.
-                    self.card_ref(buttons('yes:' + ident, 'no:' + ident)))
-        return 'درخواست اتصال برای تأیید ادمین ثبت شد؛ هنوز حسابی متصل نشده.', buttons('yes:' + ident, 'no:' + ident)
+                    self.card_ref(markup))
+        return 'درخواست اتصال برای تأیید ادمین ثبت شد؛ هنوز حسابی متصل نشده.', markup
 
     def repair_last_entity(self, chat_id, user_id, commands):
         """Point follow-up memory at the surviving row after a merge/delete.

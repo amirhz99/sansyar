@@ -449,6 +449,9 @@ class SansAgent:
             - 'save_session': (admin) create/update new or historical session; date is accepted as an alias for when_text. Jalali («۹ خرداد ساعت ۲۱», «1405/03/09 21:00») and Gregorian (YYYY-MM-DD) dates are both accepted; a Jalali date without a year uses the current Jalali year.
             - 'set_attendance': (admin) set present/absent players for a session; unknown names are refused, no player is ever created here. Each attendee may carry guest_names: [{"name":"علی","guests":2,"guest_names":["رضا"]}].
             - 'rename_player': (admin) data_json='{"player": "#15", "name": "نام کامل"}' — keeps the id and the whole history.
+            - 'bind_account': (admin) data_json='{"player": "#47", "user": 118031958}' (or "phone": "0912…")
+              connects a player to a Bale account the bot has already seen — an id or number with no
+              stored contact is refused. It builds ONE approval card; nothing is linked without a click.
             - 'merge_player': (admin) data_json='{"source": "#4", "target": "#15"}' — moves history and builds an approval card.
             - 'delete_player': (admin) data_json='{"player": "#4"}' — only for a player with no history; builds an approval card.
             - 'duplicates': (admin) list suspected duplicate or partial names.
@@ -693,8 +696,30 @@ class SansAgent:
                         return 'کلید ناشناخته در تغییرنام: ' + '، '.join(sorted(unknown))
                     result = service.rename_player(data.get('player', ''), data.get('name'), actor=user_id)
                     effects['last_player_id'] = result['id']
-                    return (f"نام بازیکن #{result['id']} از «{result['old']}» به «{result['new']}» تغییر کرد؛ "
-                            'شناسه و کل تاریخچه حفظ شد.')
+                    # SPEC-060: the declared name may be exactly what an open
+                    # claim is waiting for, so the card becomes clickable now.
+                    attached = bot.attach_claims(service.player(result['id']), user_id)
+                    reply = (f"نام بازیکن #{result['id']} از «{result['old']}» به «{result['new']}» تغییر کرد؛ "
+                             'شناسه و کل تاریخچه حفظ شد.')
+                    if attached:
+                        reply += ('\nکارت شناسایی درخواست باز همین حالا با دکمهٔ تأیید برای اتصال حساب '
+                                  'فرستاده شد؛ برای وصل کردن همان دکمه را بزنید.')
+                    return reply
+
+                if operation == 'bind_account':
+                    # SPEC-060: the admin names an account the bot already knows,
+                    # so the binding card exists without a replied profile.
+                    if not admin:
+                        return 'خطا: اتصال حساب بله به بازیکن فقط توسط ادمین انجام می‌شود.'
+                    unknown = set(data) - {'player', 'user', 'user_id', 'phone'}
+                    if unknown:
+                        return 'کلید ناشناخته در اتصال حساب: ' + '، '.join(sorted(unknown))
+                    ref = data.get('user', data.get('user_id', data.get('phone')))
+                    if ref is None or (isinstance(ref, str) and not ref.strip()):
+                        return 'شناسهٔ بله یا شمارهٔ همان حسابی را که با ربات کار کرده بفرست.'
+                    reply, markup = bot.bind_known(data.get('player', ''), ref, user_id, chat_id)
+                    effects['markup'] = markup
+                    return reply
 
                 if operation in ('merge_player', 'merge_players'):
                     unknown = set(data) - {'source', 'target', 'source_id', 'target_id'}
